@@ -2,7 +2,7 @@
 """
 Galaxy Resource Manager - Main Entry Point
 
-A terminal-based MMORPG using PostgreSQL, Nostr npubs, and Lightning payments
+A terminal-based MMORPG using SQLite, Nostr npubs, and Lightning payments
 """
 
 import argparse

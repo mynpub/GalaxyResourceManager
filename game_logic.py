@@ -3,13 +3,7 @@
 Core game logic for Galaxy Resource Manager - handles player registration and payment validation
 """
 
-import os
-import sys
 from database import get_or_create_player, get_player_info, mark_payment_paid, check_payment_status
-from nostr.client import Client
-from nostr.event import Event
-from nostr.key import PrivateKey
-import time
 
 class GameLogic:
     def __init__(self):

@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Isolated tests for SQLite persistence and legacy data migration."""
+
+import json
+import sqlite3
+import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest.mock import patch
+
+import database
+from game_logic import GameLogic
+
+
+class DatabaseTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.data_dir = Path(temporary.name) / "data"
+        data_patch = patch.object(database, "DATA_DIR", self.data_dir)
+        data_patch.start()
+        self.addCleanup(data_patch.stop)
+
+    def test_create_and_lookup_player_without_explicit_init(self):
+        npub = "a" * 64
+        player_id = database.get_or_create_player(npub)
+        self.assertEqual(database.get_or_create_player(npub), player_id)
+        self.assertNotEqual(database.get_or_create_player("b" * 64), player_id)
+        self.assertEqual(database.get_player_info(player_id), {
+            'id': player_id, 'npub': npub,
+            'fiat_balance': 0.0, 'bitcoin_balance': 0.0
+        })
+        self.assertIsNone(database.get_player_info(999))
+        database.init_database()
+        self.assertEqual(database.get_or_create_player(npub), player_id)
+
+    def test_payment_persists_and_can_be_updated(self):
+        player_id = database.get_or_create_player("a" * 64)
+        self.assertIs(database.check_payment_status(player_id), False)
+        self.assertIs(database.check_payment_status(999), False)
+        database.mark_payment_paid(player_id, "first")
+        self.assertIs(database.check_payment_status(player_id), True)
+        database.mark_payment_paid(player_id, "second")
+        with sqlite3.connect(self.data_dir / "galaxy_resources.db") as connection:
+            self.assertEqual(connection.execute(
+                "SELECT invoice_hash FROM payments WHERE player_id = ?", (player_id,)
+            ).fetchall(), [("second",)])
+        with self.assertRaises(sqlite3.IntegrityError):
+            database.mark_payment_paid(999, "invalid")
+        self.assertIs(database.check_payment_status(player_id), True)
+
+    def test_concurrent_creation_returns_same_player(self):
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            ids = list(executor.map(database.get_or_create_player, ["a" * 64] * 8))
+        self.assertEqual(len(set(ids)), 1)
+
+    def test_missing_player_cannot_credit_another_account(self):
+        player_id = database.get_or_create_player("a" * 64)
+        with self.assertRaises(ValueError):
+            database.mark_payment_paid(None, "invalid")
+        self.assertFalse(GameLogic().complete_registration("invalid"))
+        self.assertIs(database.check_payment_status(player_id), False)
+
+    def write_legacy_data(self):
+        self.data_dir.mkdir()
+        (self.data_dir / "players.json").write_text(json.dumps({
+            "a" * 64: {
+                "id": 7, "created_at": "2026-01-01T00:00:00",
+                "balance": {"fiat": 12.5, "bitcoin": 0.001}
+            }
+        }))
+        (self.data_dir / "payments.json").write_text(json.dumps({
+            "7": {"paid": True, "invoice_hash": "legacy", "timestamp": "2026-01-02"}
+        }))
+
+    def test_legacy_data_is_imported_only_once(self):
+        self.write_legacy_data()
+        database.init_database()
+        self.assertEqual(database.get_or_create_player("a" * 64), 7)
+        self.assertEqual(database.get_player_info(7)['fiat_balance'], 12.5)
+        self.assertEqual(database.get_player_info(7)['bitcoin_balance'], 0.001)
+        self.assertIs(database.check_payment_status(7), True)
+        (self.data_dir / "players.json").write_text("invalid JSON")
+        database.init_database()
+        self.assertGreater(database.get_or_create_player("b" * 64), 7)
+
+    def test_failed_migration_rolls_back_and_can_be_retried(self):
+        self.write_legacy_data()
+        payments = self.data_dir / "payments.json"
+        original = payments.read_text()
+        payments.write_text("invalid JSON")
+        with self.assertRaises(json.JSONDecodeError):
+            database.init_database()
+        payments.write_text(original)
+        database.init_database()
+        self.assertEqual(database.get_or_create_player("a" * 64), 7)
+        self.assertIs(database.check_payment_status(7), True)
+
+    def test_game_registration_flow(self):
+        game = GameLogic()
+        self.assertTrue(game.create_player_account("a" * 64))
+        self.assertFalse(game.check_payment())
+        self.assertTrue(game.complete_registration("test_invoice"))
+        self.assertTrue(game.check_payment())
+        self.assertEqual(game.get_player_info()['npub'], "a" * 64)
+
+
+if __name__ == "__main__":
+    unittest.main()
