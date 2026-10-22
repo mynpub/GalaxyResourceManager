@@ -78,16 +78,17 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(database.get_verification_challenge(
             challenge['id'], 700)['status'], "expired")
         self.assertIsNone(database.consume_challenge_and_create_player(
-            challenge['id'], challenge['pubkey'], 700))
+            challenge['id'], challenge['pubkey']))
         self.assertIsNone(database.get_verification_challenge("missing", 100))
         self.assertIsNone(database.get_player_info(1))
 
     def test_only_one_concurrent_challenge_redemption_succeeds(self):
         challenge = self.issue_challenge()
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with patch("database.time.time", return_value=101), \
+                ThreadPoolExecutor(max_workers=4) as executor:
             ids = list(executor.map(
                 lambda _: database.consume_challenge_and_create_player(
-                    challenge['id'], challenge['pubkey'], 101), range(8)
+                    challenge['id'], challenge['pubkey']), range(8)
             ))
         self.assertEqual(sum(player_id is not None for player_id in ids), 1)
         self.assertEqual(database.get_verification_challenge(

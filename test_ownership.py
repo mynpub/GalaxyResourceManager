@@ -115,6 +115,26 @@ class OwnershipTests(unittest.TestCase):
                 self.npub, self.sign(challenge), challenge['id']))
         self.assert_no_players()
 
+    def test_expiry_is_checked_after_acquiring_sqlite_write_lock(self):
+        challenge = self.issue()
+        original_connection = database._connection
+
+        @contextlib.contextmanager
+        def delayed_write_lock():
+            with original_connection() as connection:
+                def trace(statement):
+                    if statement == "BEGIN IMMEDIATE":
+                        # Simulate the write lock becoming available at expiry.
+                        clock.return_value = challenge['expires_at']
+                connection.set_trace_callback(trace)
+                yield connection
+
+        with patch("database.time.time", return_value=challenge['expires_at'] - 1) as clock, \
+                patch.object(database, "_connection", delayed_write_lock):
+            self.assertFalse(self.game.create_player_account(
+                self.npub, self.sign(challenge), challenge['id']))
+        self.assert_no_players()
+
     def test_replay_fails_even_from_another_instance(self):
         challenge = self.issue()
         signature = self.sign(challenge)

@@ -73,7 +73,7 @@ class GameLogic:
             if not verify_signature(pubkey, challenge['challenge'], signature):
                 raise ValueError("Invalid ownership signature.")
             player_id = consume_challenge_and_create_player(
-                challenge_id, pubkey, int(time.time()))
+                challenge_id, pubkey)
             if player_id is None:
                 raise ValueError("Registration challenge is expired or already used; begin again.")
             self.player_id = player_id

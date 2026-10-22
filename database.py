@@ -5,6 +5,7 @@ SQLite persistence for Galaxy Resource Manager.
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -150,13 +151,15 @@ def get_verification_challenge(challenge_id, now):
         return dict(challenge) if challenge is not None else None
 
 
-def consume_challenge_and_create_player(challenge_id, pubkey, now):
+def consume_challenge_and_create_player(challenge_id, pubkey):
     """Atomically redeem a verified challenge and create/load its player.
 
     Only the caller verifying the signature should invoke this storage helper.
     Conditional updates prevent concurrent registration attempts from replaying it.
     """
     with _connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        now = int(time.time())
         updated = connection.execute(
             """UPDATE verification_challenges SET status = 'used'
                WHERE id = ? AND pubkey = ? AND status = 'issued'
