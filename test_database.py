@@ -62,6 +62,44 @@ class DatabaseTests(unittest.TestCase):
         self.assertFalse(GameLogic().complete_registration("invalid"))
         self.assertIs(database.check_payment_status(player_id), False)
 
+    def issue_challenge(self):
+        challenge = {
+            "id": "test-challenge", "pubkey": "a" * 64,
+            "challenge": "test challenge", "created_at": 100, "expires_at": 700
+        }
+        database.create_verification_challenge(challenge)
+        return challenge
+
+    def test_challenge_persists_and_expires(self):
+        challenge = self.issue_challenge()
+        stored = database.get_verification_challenge(challenge['id'], 100)
+        self.assertEqual(stored, dict(challenge, status="issued"))
+        self.assertEqual(database.get_verification_challenge(
+            challenge['id'], 700)['status'], "expired")
+        self.assertIsNone(database.consume_challenge_and_create_player(
+            challenge['id'], challenge['pubkey'], 700))
+        self.assertIsNone(database.get_verification_challenge("missing", 100))
+        self.assertIsNone(database.get_player_info(1))
+
+    def test_only_one_concurrent_challenge_redemption_succeeds(self):
+        challenge = self.issue_challenge()
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            ids = list(executor.map(
+                lambda _: database.consume_challenge_and_create_player(
+                    challenge['id'], challenge['pubkey'], 101), range(8)
+            ))
+        self.assertEqual(sum(player_id is not None for player_id in ids), 1)
+        self.assertEqual(database.get_verification_challenge(
+            challenge['id'], 101)['status'], "used")
+
+    def test_challenge_upgrade_preserves_existing_sqlite_data(self):
+        player_id = database.get_or_create_player("a" * 64)
+        with sqlite3.connect(self.data_dir / "galaxy_resources.db") as connection:
+            connection.execute("DROP TABLE verification_challenges")
+            connection.execute("PRAGMA user_version = 1")
+        self.issue_challenge()
+        self.assertEqual(database.get_player_info(player_id)['npub'], "a" * 64)
+
     def write_legacy_data(self):
         self.data_dir.mkdir()
         (self.data_dir / "players.json").write_text(json.dumps({
