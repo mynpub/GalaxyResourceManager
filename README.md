@@ -1,6 +1,6 @@
 # Galaxy Resource Manager
 
-A terminal-based MMORPG using PostgreSQL, Nostr npubs, and Lightning payments.
+A terminal-based MMORPG using SQLite, Nostr npubs, and Lightning payments.
 
 ## Project Overview
 
@@ -11,7 +11,7 @@ Galaxy Resource Manager is a terminal-based multiplayer online role-playing game
 - Terminal-based interface
 - Nostr npub authentication
 - Lightning Network payments (5000 sats for account creation)
-- PostgreSQL database storage (simulated in this version)
+- SQLite database storage with indexed player and payment lookups
 - Player registration workflow
 
 ## Installation
@@ -49,7 +49,7 @@ python main.py
 ```
 GalaxyResourceManager/
 ├── main.py            # Main entry point with command-line argument parsing
-├── database.py        # Database handling and player data management (simulated)
+├── database.py        # SQLite storage and player data management
 ├── game_logic.py      # Core game logic for account creation and payment flow
 ├── requirements.txt   # Python dependencies
 └── README.md          # This file
@@ -68,12 +68,23 @@ This is a barebones implementation that demonstrates:
 - Nostr public key validation
 - Account creation flow
 - Payment validation (simulated)
-- Database interaction (using file-based storage for demonstration)
+- Transaction-safe SQLite persistence at `~/.galaxy_resources/galaxy_resources.db`
 
-To fully integrate with PostgreSQL and Lightning:
-1. Install PostgreSQL database
-2. Configure environment variables for database connection
-3. Connect to your Core Lightning node for payment processing
+Storage initializes automatically when first used, or explicitly with `python main.py --init`.
+Existing `players.json` and `payments.json` files in `~/.galaxy_resources` are
+imported together in a single transaction on first use. IDs, balances, and payment
+records are preserved. The JSON files remain untouched as backups and are not
+read again after a successful import. SQLite uses Python's standard library;
+no database server is required.
+
+Run isolated persistence and registration tests with:
+```bash
+python -m unittest test_database.py
+```
+The existing demonstration script also remains available as `python test_game_flow.py`.
+
+To process real payments, connect to your Core Lightning node; invoice generation
+and payment confirmation are still simulated.
 
 ## License
 

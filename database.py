@@ -1,109 +1,135 @@
 #!/usr/bin/env python3
 """
-Database module for Galaxy Resource Manager - handles player data simulation
+SQLite persistence for Galaxy Resource Manager.
 """
 
-import os
 import json
-import hashlib
+import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-# For testing purposes, we'll simulate database storage in local files
 DATA_DIR = Path.home() / ".galaxy_resources"
-DATA_DIR.mkdir(exist_ok=True)
+
+
+def _initialize(connection):
+    if connection.execute("PRAGMA user_version").fetchone()[0]:
+        return
+
+    # Serialize first-time setup so concurrent processes import legacy data once.
+    connection.execute("BEGIN IMMEDIATE")
+    if connection.execute("PRAGMA user_version").fetchone()[0]:
+        return
+    connection.execute("""
+        CREATE TABLE players (
+            id INTEGER PRIMARY KEY,
+            npub TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            fiat_balance REAL NOT NULL DEFAULT 0,
+            bitcoin_balance REAL NOT NULL DEFAULT 0
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE payments (
+            player_id INTEGER PRIMARY KEY REFERENCES players(id),
+            paid INTEGER NOT NULL CHECK (paid IN (0, 1)),
+            invoice_hash TEXT,
+            timestamp TEXT NOT NULL
+        )
+    """)
+
+    players_file = DATA_DIR / "players.json"
+    if players_file.exists():
+        with players_file.open() as f:
+            for npub, player in json.load(f).items():
+                connection.execute(
+                    "INSERT INTO players VALUES (?, ?, ?, ?, ?)",
+                    (player['id'], npub, player['created_at'],
+                     player['balance']['fiat'], player['balance']['bitcoin'])
+                )
+    payments_file = DATA_DIR / "payments.json"
+    if payments_file.exists():
+        with payments_file.open() as f:
+            for player_id, payment in json.load(f).items():
+                connection.execute(
+                    "INSERT INTO payments VALUES (?, ?, ?, ?)",
+                    (int(player_id), payment['paid'], payment['invoice_hash'],
+                     payment['timestamp'])
+                )
+    connection.execute("PRAGMA user_version = 1")
+
+
+@contextmanager
+def _connection():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DATA_DIR / "galaxy_resources.db")
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        with connection:
+            _initialize(connection)
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
 
 def init_database():
-    """Initialize the data storage for simulation"""
-    print("Database initialized successfully!")
-    print("Storage location:", DATA_DIR)
-    
+    """Initialize SQLite storage and import legacy JSON data once."""
+    with _connection():
+        pass
+
+
 def get_or_create_player(npub):
-    """Get existing player or create a new one (simulated)"""
-    # Create a simple file-based storage system
-    players_file = DATA_DIR / "players.json"
-    
-    if players_file.exists():
-        with open(players_file, 'r') as f:
-            players_data = json.load(f)
-    else:
-        players_data = {}
-    
-    if npub in players_data:
-        print(f"Player already exists with npub: {npub}")
-        return players_data[npub]['id']
-    else:
-        # Create new player
-        new_id = len(players_data) + 1
-        players_data[npub] = {
-            'id': new_id,
-            'npub': npub,
-            'created_at': datetime.now().isoformat(),
-            'balance': {'fiat': 0.00, 'bitcoin': 0.00000000}
-        }
-        
-        with open(players_file, 'w') as f:
-            json.dump(players_data, f)
-            
-        print(f"New player created with npub: {npub}")
-        return new_id
+    """Get an existing player ID or atomically create a player."""
+    with _connection() as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE npub = ?", (npub,)
+        ).fetchone()
+        if player is not None:
+            return player['id']
+        connection.execute(
+            """INSERT INTO players (npub, created_at) VALUES (?, ?)
+               ON CONFLICT(npub) DO NOTHING""",
+            (npub, datetime.now().isoformat())
+        )
+        return connection.execute(
+            "SELECT id FROM players WHERE npub = ?", (npub,)
+        ).fetchone()['id']
+
 
 def get_player_info(player_id):
-    """Get complete player information (simulated)"""
-    players_file = DATA_DIR / "players.json"
-    
-    if players_file.exists():
-        with open(players_file, 'r') as f:
-            players_data = json.load(f)
-            
-        # Find player by ID
-        for npub, player_info in players_data.items():
-            if player_info['id'] == player_id:
-                return {
-                    'id': player_info['id'],
-                    'npub': npub,
-                    'fiat_balance': player_info['balance']['fiat'], 
-                    'bitcoin_balance': player_info['balance']['bitcoin']
-                }
-    
-    return None
+    """Get player information using the indexed player ID."""
+    with _connection() as connection:
+        player = connection.execute(
+            """SELECT id, npub, fiat_balance, bitcoin_balance
+               FROM players WHERE id = ?""", (player_id,)
+        ).fetchone()
+        return dict(player) if player is not None else None
+
 
 def mark_payment_paid(player_id, invoice_hash):
-    """Mark a player's payment as paid (simulated)"""
-    # In a real implementation, this would update the database
-    payments_file = DATA_DIR / "payments.json"
-    
-    if payments_file.exists():
-        with open(payments_file, 'r') as f:
-            payments_data = json.load(f)
-    else:
-        payments_data = {}
-    
-    # Mark payment as paid for player_id
-    payments_data[player_id] = {
-        'paid': True,
-        'invoice_hash': invoice_hash,
-        'timestamp': datetime.now().isoformat()
-    }
-    
-    with open(payments_file, 'w') as f:
-        json.dump(payments_data, f)
-        
-    print(f"Payment marked as paid for player {player_id}")
+    """Atomically record or update a player's simulated payment."""
+    with _connection() as connection:
+        connection.execute(
+            """INSERT INTO payments (player_id, paid, invoice_hash, timestamp)
+               VALUES (?, 1, ?, ?)
+               ON CONFLICT(player_id) DO UPDATE SET
+                   paid = excluded.paid,
+                   invoice_hash = excluded.invoice_hash,
+                   timestamp = excluded.timestamp""",
+            (player_id, invoice_hash, datetime.now().isoformat())
+        )
+
 
 def check_payment_status(player_id):
-    """Check if a player has made the required payment (simulated)"""
-    payments_file = DATA_DIR / "payments.json"
-    
-    if payments_file.exists():
-        with open(payments_file, 'r') as f:
-            payments_data = json.load(f)
-            
-        if player_id in payments_data:
-            return payments_data[player_id]['paid']
-    
-    return False
+    """Check whether a player's simulated payment has been recorded."""
+    with _connection() as connection:
+        payment = connection.execute(
+            "SELECT paid FROM payments WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        return bool(payment['paid']) if payment is not None else False
+
 
 if __name__ == "__main__":
-    # Initialize the database when run directly
     init_database()
