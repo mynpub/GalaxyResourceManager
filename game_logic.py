@@ -3,7 +3,18 @@
 Core game logic for Galaxy Resource Manager - handles player registration and payment validation
 """
 
-from database import get_or_create_player, get_player_info, mark_payment_paid, check_payment_status
+import hashlib
+import secrets
+import time
+
+from database import (
+    get_player_info, mark_payment_paid, check_payment_status,
+    create_verification_challenge, get_verification_challenge,
+    consume_challenge_and_create_player,
+)
+from ownership import normalize_pubkey, verify_signature
+
+CHALLENGE_LIFETIME_SECONDS = 600
 
 class GameLogic:
     def __init__(self):
@@ -12,36 +23,61 @@ class GameLogic:
         self.npub = None
         
     def validate_npub(self, npub: str) -> bool:
-        """
-        Validate that the provided npub is a legitimate Nostr public key
-        (64-character hex string)
-        """
-        if not npub:
-            return False
-            
-        # Nostr public keys are 64-character hex strings
-        if len(npub) != 64:
-            return False
-            
+        """Validate hex or NIP-19 npub input without asserting ownership."""
         try:
-            int(npub, 16)  # Try to convert to integer - will raise exception if not valid hex
+            normalize_pubkey(npub)
             return True
         except ValueError:
             return False
-    
-    def create_player_account(self, npub: str) -> bool:
+
+    def begin_registration(self, npub: str) -> dict:
+        """Issue a ten-minute, single-use proof of control for this public key."""
+        pubkey = normalize_pubkey(npub)
+        now = int(time.time())
+        challenge_id = secrets.token_hex(32)
+        expires_at = now + CHALLENGE_LIFETIME_SECONDS
+        text = (
+            "GalaxyResourceManager registration ownership proof\n"
+            f"Challenge ID: {challenge_id}\n"
+            f"Public key: {pubkey}\n"
+            f"Created at: {now}\n"
+            f"Expires at: {expires_at}"
+        )
+        challenge = {
+            "id": challenge_id, "pubkey": pubkey, "challenge": text,
+            "status": "issued", "created_at": now, "expires_at": expires_at,
+            "signing_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        }
+        create_verification_challenge(challenge)
+        return challenge
+
+    def create_player_account(self, npub: str, signature: str = None,
+                              challenge_id: str = None) -> bool:
         """
-        Create a player account with the given npub
+        Verify ownership, then atomically consume the challenge and create an account.
         Returns True if successful, False otherwise
         """
-        if not self.validate_npub(npub):
-            print("Invalid Nostr public key format!")
-            return False
-            
+        self.player_id = None
+        self.npub = None
         try:
-            print(f"Creating account for npub: {npub}")
-            self.player_id = get_or_create_player(npub)
-            self.npub = npub
+            pubkey = normalize_pubkey(npub)
+            if not signature or not challenge_id:
+                raise ValueError("Ownership verification requires a challenge ID and signature.")
+            challenge = get_verification_challenge(challenge_id, int(time.time()))
+            if challenge is None:
+                raise ValueError("Registration challenge not found.")
+            if challenge['pubkey'] != pubkey:
+                raise ValueError("Registration challenge belongs to a different public key.")
+            if challenge['status'] != 'issued':
+                raise ValueError(f"Registration challenge is {challenge['status']}; begin again.")
+            if not verify_signature(pubkey, challenge['challenge'], signature):
+                raise ValueError("Invalid ownership signature.")
+            player_id = consume_challenge_and_create_player(
+                challenge_id, pubkey)
+            if player_id is None:
+                raise ValueError("Registration challenge is expired or already used; begin again.")
+            self.player_id = player_id
+            self.npub = pubkey
             print("Account created successfully!")
             return True
         except Exception as e:
@@ -53,6 +89,8 @@ class GameLogic:
         Generate a Lightning Network invoice for the specified amount (in sats)
         This function would interface with your Core Lightning node
         """
+        if self.player_id is None:
+            raise ValueError("Verify ownership before generating a registration invoice.")
         print(f"Generating Lightning invoice for {amount_sats} sats...")
         
         # Since we don't have an actual Core Lightning node connected, 
@@ -113,8 +151,18 @@ def main():
     # Get npub from player
     npub = input("Please enter your Nostr public key (npub): ").strip()
     
-    # Create account
-    if not game.create_player_account(npub):
+    try:
+        challenge = game.begin_registration(npub)
+    except ValueError as e:
+        print(e)
+        return
+    print("\nSign SHA-256 of this exact UTF-8 text using BIP-340 Schnorr:")
+    print(challenge['challenge'])
+    print(f"Signing hash: {challenge['signing_hash']}")
+    signature = input("Enter the 128-character hex signature: ").strip()
+
+    # Create account only after ownership verification.
+    if not game.create_player_account(npub, signature, challenge['id']):
         print("Account creation failed!")
         return
     

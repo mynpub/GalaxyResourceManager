@@ -5,6 +5,7 @@ SQLite persistence for Galaxy Resource Manager.
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -13,11 +14,27 @@ DATA_DIR = Path.home() / ".galaxy_resources"
 
 
 def _initialize(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0]:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
         return
 
     # Serialize first-time setup so concurrent processes import legacy data once.
     connection.execute("BEGIN IMMEDIATE")
+    if not connection.execute("PRAGMA user_version").fetchone()[0]:
+        _import_legacy_data(connection)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS verification_challenges (
+            id TEXT PRIMARY KEY,
+            pubkey TEXT NOT NULL,
+            challenge TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('issued', 'used', 'expired')),
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+    """)
+    connection.execute("PRAGMA user_version = 2")
+
+
+def _import_legacy_data(connection):
     if connection.execute("PRAGMA user_version").fetchone()[0]:
         return
     connection.execute("""
@@ -83,19 +100,80 @@ def init_database():
 def get_or_create_player(npub):
     """Get an existing player ID or atomically create a player."""
     with _connection() as connection:
+        return _get_or_create_player(connection, npub)
+
+
+def _get_or_create_player(connection, npub):
+    player = connection.execute(
+        "SELECT id FROM players WHERE npub = ?", (npub,)
+    ).fetchone()
+    if player is None:
+        # Older registrations accepted uppercase hex without normalization.
         player = connection.execute(
-            "SELECT id FROM players WHERE npub = ?", (npub,)
+            "SELECT id FROM players WHERE lower(npub) = ? LIMIT 1", (npub,)
         ).fetchone()
-        if player is not None:
-            return player['id']
+    if player is not None:
+        connection.execute("UPDATE players SET npub = ? WHERE id = ?",
+                           (npub, player['id']))
+        return player['id']
+    connection.execute(
+        """INSERT INTO players (npub, created_at) VALUES (?, ?)
+           ON CONFLICT(npub) DO NOTHING""",
+        (npub, datetime.now().isoformat())
+    )
+    return connection.execute(
+        "SELECT id FROM players WHERE npub = ?", (npub,)
+    ).fetchone()['id']
+
+
+def create_verification_challenge(challenge):
+    """Persist an issued ownership challenge, with UTC Unix timestamps."""
+    with _connection() as connection:
         connection.execute(
-            """INSERT INTO players (npub, created_at) VALUES (?, ?)
-               ON CONFLICT(npub) DO NOTHING""",
-            (npub, datetime.now().isoformat())
+            """INSERT INTO verification_challenges
+               (id, pubkey, challenge, status, created_at, expires_at)
+               VALUES (:id, :pubkey, :challenge, 'issued', :created_at, :expires_at)""",
+            challenge
         )
-        return connection.execute(
-            "SELECT id FROM players WHERE npub = ?", (npub,)
-        ).fetchone()['id']
+
+
+def get_verification_challenge(challenge_id, now):
+    """Fetch a challenge and persist its expired state when necessary."""
+    with _connection() as connection:
+        connection.execute(
+            """UPDATE verification_challenges SET status = 'expired'
+               WHERE id = ? AND status = 'issued' AND expires_at <= ?""",
+            (challenge_id, now)
+        )
+        challenge = connection.execute(
+            "SELECT * FROM verification_challenges WHERE id = ?", (challenge_id,)
+        ).fetchone()
+        return dict(challenge) if challenge is not None else None
+
+
+def consume_challenge_and_create_player(challenge_id, pubkey):
+    """Atomically redeem a verified challenge and create/load its player.
+
+    Only the caller verifying the signature should invoke this storage helper.
+    Conditional updates prevent concurrent registration attempts from replaying it.
+    """
+    with _connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        now = int(time.time())
+        updated = connection.execute(
+            """UPDATE verification_challenges SET status = 'used'
+               WHERE id = ? AND pubkey = ? AND status = 'issued'
+                   AND expires_at > ?""",
+            (challenge_id, pubkey, now)
+        )
+        if updated.rowcount != 1:
+            connection.execute(
+                """UPDATE verification_challenges SET status = 'expired'
+                   WHERE id = ? AND status = 'issued' AND expires_at <= ?""",
+                (challenge_id, now)
+            )
+            return None
+        return _get_or_create_player(connection, pubkey)
 
 
 def get_player_info(player_id):
