@@ -8,12 +8,13 @@ and free access.
 Galaxy Resource Manager is a terminal-based multiplayer role-playing game prototype
 where players manage resources in space. Register a username and password to create
 an immediately usable account. No signup payment or activation step is required.
-The current implementation provides local account registration, authentication,
-and balance storage, not a network service or a complete gameplay loop.
+The current implementation provides account registration, authentication,
+balance storage, and hosted TCP terminal sessions, not a complete gameplay loop.
 
 ## Features
 
 - Terminal-based interface
+- Multi-client hosted TCP terminal sessions
 - Username/password signup and login
 - Salted PBKDF2-HMAC-SHA256 password storage
 - Transaction-safe SQLite storage and legacy migration
@@ -47,7 +48,7 @@ Log in to an existing account:
 python main.py --login --username explorer
 ```
 
-Omit `--username` to enter it at a prompt. Passwords are always entered using
+Omit `--username` to enter it at a prompt. In local mode, passwords are entered using
 `getpass`, never command-line arguments; signup asks for confirmation. Use an
 interactive terminal: if hidden input is unavailable, authentication stops rather
 than falling back to echoed input. Do not place passwords in shell commands or
@@ -85,6 +86,104 @@ flow. It also accepts the options above.
   There are no persistent login tokens, password recovery, or account-claim
   facilities. Protect the database, JSON backups, and OS account from other users.
 
+## Hosted TCP Server Mode
+
+Start the server on the host where players' accounts should be stored:
+```bash
+python main.py --serve-tcp --host 0.0.0.0 --port 7777
+```
+
+The defaults are `0.0.0.0:7777`. No external services or additional dependencies
+are required. SQLite initializes automatically, using the server OS user's
+`~/.galaxy_resources/galaxy_resources.db`. Local and hosted modes use the same
+account APIs and storage. Back up this directory and restrict its permissions.
+
+After deploying to `129.121.136.245`, players connect with:
+```bash
+nc 129.121.136.245 7777
+```
+
+Choose `signup` (alias `register`) or `login`, then enter your username and
+password at the prompts. Signup asks for password confirmation. Use `help`,
+`status` or `profile` (username and balances), and `quit`. Each connection has
+independent authentication state. There are no resource-management commands yet.
+Input is newline-delimited UTF-8; LF and CRLF are supported. Basic telnet clients
+can work in line mode, but Telnet option negotiation and terminal escape/control
+sequences are not supported; netcat is recommended.
+
+For an Ubuntu host using UFW, an example public firewall rule is:
+```bash
+sudo ufw allow 7777/tcp
+```
+Also check any provider firewall/security group. Prefer restricting source IPs or
+using a tunnel rather than exposing credentials publicly. Opening this port does
+not alter the website's HTTP/HTTPS service.
+
+### Security and limitations
+
+**Plain TCP has no encryption or server authentication: credentials and game
+traffic travel in cleartext.** Netcat does not provide password masking; your
+terminal may visibly echo passwords as you type. The server never echoes typed
+passwords in responses or logs. Do not reuse passwords from other services.
+
+For production, use an SSH tunnel, stunnel, or a TLS-capable TCP reverse proxy
+(an ordinary HTTP proxy is not sufficient). For example, bind the game server to
+`127.0.0.1` and forward it from your client:
+```bash
+ssh -N -L 7777:127.0.0.1:7777 serveruser@129.121.136.245
+# In a second client terminal:
+nc 127.0.0.1 7777
+```
+The SSH account is an OS account, not a game account. With a tunnel-only setup,
+do not open public TCP 7777. TLS and SSH hosting are not implemented by the game.
+
+The lightweight safeguards are a 1,024-byte limit per line (including newline),
+120-second socket inactivity timeout, at most 64 simultaneous clients, and
+disconnect after three failed authentication/signup attempts per connection.
+Invalid UTF-8, control characters, and oversized lines disconnect that client.
+These are not per-IP/global abuse protection: reconnecting resets attempt limits.
+Use firewall restrictions and external rate limiting for public deployments.
+Threads and SQLite suit light use, not large-scale multiplayer hosting.
+
+### Running continuously
+
+For a simple foreground deployment:
+```bash
+tmux new -s galaxy
+python main.py --serve-tcp --host 0.0.0.0 --port 7777
+```
+Detach with Ctrl+B, D; return with `tmux attach -t galaxy`. Ctrl+C stops the
+listener, disconnects active clients, and joins session threads. An in-flight
+database/hash operation finishes before its thread exits.
+
+For systemd, install the following as `/etc/systemd/system/galaxy-tcp.service`,
+adjusting the account and checkout path. Run as a dedicated unprivileged user:
+```ini
+[Unit]
+Description=Galaxy Resource Manager TCP server
+After=network.target
+
+[Service]
+Type=simple
+User=galaxy
+WorkingDirectory=/opt/GalaxyResourceManager
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/GalaxyResourceManager/main.py --serve-tcp --host 0.0.0.0 --port 7777
+KillSignal=SIGINT
+TimeoutStopSec=30
+Restart=on-failure
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+```
+Ensure the service user has a writable home for SQLite storage. `KillSignal=SIGINT`
+uses the same graceful shutdown as Ctrl+C. Enable with
+`sudo systemctl daemon-reload && sudo systemctl enable --now galaxy-tcp`.
+View startup and client connect/disconnect logs with
+`journalctl -u galaxy-tcp -f`. These instructions deploy the feature; they do not
+automatically install it on the public server.
+
 ## Project Structure
 
 ```
@@ -93,6 +192,7 @@ GalaxyResourceManager/
 ├── database.py        # SQLite storage and player data management
 ├── authentication.py  # Credential validation and password hashing
 ├── game_logic.py      # Registration and current-player authentication state
+├── tcp_server.py      # Threaded, bounded TCP terminal sessions
 ├── requirements.txt   # No third-party dependencies currently required
 └── README.md          # This file
 ```
@@ -135,7 +235,8 @@ real account database):
 python -m unittest discover -v
 ```
 Or run focused tests with `python -m unittest test_authentication.py`,
-`python -m unittest test_database.py`, or `python test_game_flow.py`.
+`python -m unittest test_database.py`, `python test_game_flow.py`, or
+`python -m unittest test_tcp_server -v` for loopback TCP and server CLI tests.
 
 ## License
 

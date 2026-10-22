@@ -8,10 +8,11 @@ from database import authenticate_player, create_player, get_player_info
 
 
 class GameLogic:
-    def __init__(self):
+    def __init__(self, output=None):
         """Start with no authenticated player."""
         self.player_id = None
         self.username = None
+        self.output = output if output is not None else lambda message: print(message)
 
     def _clear_authentication(self):
         self.player_id = None
@@ -25,13 +26,13 @@ class GameLogic:
             player_id = create_player(username, password)
             self.player_id = player_id
             self.username = username
-            print("Account created successfully!")
+            self.output("Account created successfully!")
             return True
         except ValueError as error:
-            print(str(error))
+            self.output(str(error))
             return False
         except sqlite3.Error:
-            print("Unable to create account. Username may be unavailable or storage unavailable.")
+            self.output("Unable to create account. Username may be unavailable or storage unavailable.")
             return False
 
     def login(self, username: str, password: str) -> bool:
@@ -43,11 +44,11 @@ class GameLogic:
             if player_id is not None:
                 self.player_id = player_id
                 self.username = username
-                print("Login successful!")
+                self.output("Login successful!")
                 return True
         except (ValueError, sqlite3.Error):
             pass
-        print("Unable to log in. Invalid username or password, or storage unavailable.")
+        self.output("Unable to log in. Invalid username or password, or storage unavailable.")
         return False
 
     def get_player_info(self):

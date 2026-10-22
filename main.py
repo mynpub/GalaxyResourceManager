@@ -7,6 +7,7 @@ A terminal-based MMORPG with local username/password accounts and free access.
 
 import argparse
 import getpass
+import logging
 import warnings
 from game_logic import GameLogic
 from database import init_database
@@ -20,6 +21,10 @@ def setup_parser():
                                 help='Create a free account (password prompted securely)')
     authentication.add_argument('--login', action='store_true',
                                 help='Log in (password prompted securely)')
+    authentication.add_argument('--serve-tcp', action='store_true',
+                                help='Host plaintext TCP terminal sessions')
+    parser.add_argument('--host', default='0.0.0.0', help='TCP bind address (default: 0.0.0.0)')
+    parser.add_argument('--port', type=int, default=7777, help='TCP port (default: 7777)')
     parser.add_argument('--username', help='Username; prompted if omitted (3-32 letters/digits/_)')
     return parser
 
@@ -31,10 +36,21 @@ def main(argv=None):
     # Parse command line arguments
     parser = setup_parser()
     args = parser.parse_args(argv)
-    if args.init and (args.register or args.login or args.username is not None):
+    if args.init and (args.register or args.login or args.serve_tcp or args.username is not None):
         parser.error("--init cannot be combined with account options")
     if args.username is not None and not (args.register or args.login):
         parser.error("--username requires --register or --login")
+    if not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
+
+    if args.serve_tcp:
+        from tcp_server import serve_tcp
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        try:
+            serve_tcp(args.host, args.port)
+        except OSError as error:
+            parser.exit(1, f"Unable to start TCP server: {error}\n")
+        return 0
 
     # Check if initialization is requested
     if args.init:
