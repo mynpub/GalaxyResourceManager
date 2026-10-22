@@ -104,8 +104,13 @@ def get_or_create_player(npub):
 
 def _get_or_create_player(connection, npub):
     player = connection.execute(
-        "SELECT id FROM players WHERE lower(npub) = ?", (npub,)
+        "SELECT id FROM players WHERE npub = ?", (npub,)
     ).fetchone()
+    if player is None:
+        # Older registrations accepted uppercase hex without normalization.
+        player = connection.execute(
+            "SELECT id FROM players WHERE lower(npub) = ? LIMIT 1", (npub,)
+        ).fetchone()
     if player is not None:
         connection.execute("UPDATE players SET npub = ? WHERE id = ?",
                            (npub, player['id']))

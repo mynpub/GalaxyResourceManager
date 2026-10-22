@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import database
 from game_logic import GameLogic
+from nostr.key import PrivateKey
 
 
 class DatabaseTests(unittest.TestCase):
@@ -137,11 +138,15 @@ class DatabaseTests(unittest.TestCase):
 
     def test_game_registration_flow(self):
         game = GameLogic()
-        self.assertTrue(game.create_player_account("a" * 64))
+        key = PrivateKey()
+        challenge = game.begin_registration(key.public_key.hex())
+        signature = key.sign_message_hash(bytes.fromhex(challenge['signing_hash']))
+        self.assertTrue(game.create_player_account(
+            key.public_key.hex(), signature, challenge['id']))
         self.assertFalse(game.check_payment())
         self.assertTrue(game.complete_registration("test_invoice"))
         self.assertTrue(game.check_payment())
-        self.assertEqual(game.get_player_info()['npub'], "a" * 64)
+        self.assertEqual(game.get_player_info()['npub'], key.public_key.hex())
 
 
 if __name__ == "__main__":
