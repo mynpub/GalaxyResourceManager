@@ -5,33 +5,59 @@ SQLite persistence for Galaxy Resource Manager.
 
 import json
 import sqlite3
-import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+
+from authentication import hash_password, normalize_username, verify_password
 
 DATA_DIR = Path.home() / ".galaxy_resources"
 
 
 def _initialize(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 3:
         return
 
-    # Serialize first-time setup so concurrent processes import legacy data once.
-    connection.execute("BEGIN IMMEDIATE")
-    if not connection.execute("PRAGMA user_version").fetchone()[0]:
-        _import_legacy_data(connection)
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS verification_challenges (
-            id TEXT PRIMARY KEY,
-            pubkey TEXT NOT NULL,
-            challenge TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('issued', 'used', 'expired')),
-            created_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL
-        )
-    """)
-    connection.execute("PRAGMA user_version = 2")
+    # Rebuilding players permits NULL legacy keys without changing child records.
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        with connection:
+            # Another process may have finished initialization while we waited.
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version >= 3:
+                return
+            if version == 0:
+                _import_legacy_data(connection)
+            connection.execute("""
+                CREATE TABLE players_v3 (
+                    id INTEGER PRIMARY KEY,
+                    npub TEXT UNIQUE,
+                    created_at TEXT NOT NULL,
+                    fiat_balance REAL NOT NULL DEFAULT 0,
+                    bitcoin_balance REAL NOT NULL DEFAULT 0,
+                    username TEXT UNIQUE COLLATE NOCASE,
+                    password_hash TEXT,
+                    CHECK (
+                        (npub IS NOT NULL AND username IS NULL AND password_hash IS NULL)
+                        OR (npub IS NULL AND username IS NOT NULL AND password_hash IS NOT NULL)
+                    ),
+                    CHECK (username IS NULL OR
+                        (length(username) BETWEEN 3 AND 32
+                         AND username NOT GLOB '*[^a-z0-9_]*'))
+                )
+            """)
+            connection.execute("""
+                INSERT INTO players_v3 (id, npub, created_at, fiat_balance, bitcoin_balance)
+                SELECT id, npub, created_at, fiat_balance, bitcoin_balance FROM players
+            """)
+            connection.execute("DROP TABLE players")
+            connection.execute("ALTER TABLE players_v3 RENAME TO players")
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise sqlite3.IntegrityError("Legacy data contains invalid references")
+            connection.execute("PRAGMA user_version = 3")
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
 
 
 def _import_legacy_data(connection):
@@ -97,118 +123,38 @@ def init_database():
         pass
 
 
-def get_or_create_player(npub):
-    """Get an existing player ID or atomically create a player."""
+def create_player(username, password):
+    """Create a new credentialed player; duplicates never load existing accounts."""
+    username = normalize_username(username)
+    password_hash = hash_password(password)
     with _connection() as connection:
-        return _get_or_create_player(connection, npub)
+        cursor = connection.execute(
+            """INSERT INTO players (username, password_hash, created_at)
+               VALUES (?, ?, ?)""",
+            (username, password_hash, datetime.now().isoformat())
+        )
+        return cursor.lastrowid
 
 
-def _get_or_create_player(connection, npub):
-    player = connection.execute(
-        "SELECT id FROM players WHERE npub = ?", (npub,)
-    ).fetchone()
-    if player is None:
-        # Older registrations accepted uppercase hex without normalization.
+def authenticate_player(username, password):
+    """Return the authenticated ID, or None; legacy accounts have no credentials."""
+    username = normalize_username(username)
+    with _connection() as connection:
         player = connection.execute(
-            "SELECT id FROM players WHERE lower(npub) = ? LIMIT 1", (npub,)
+            "SELECT id, password_hash FROM players WHERE username = ?", (username,)
         ).fetchone()
-    if player is not None:
-        connection.execute("UPDATE players SET npub = ? WHERE id = ?",
-                           (npub, player['id']))
-        return player['id']
-    connection.execute(
-        """INSERT INTO players (npub, created_at) VALUES (?, ?)
-           ON CONFLICT(npub) DO NOTHING""",
-        (npub, datetime.now().isoformat())
-    )
-    return connection.execute(
-        "SELECT id FROM players WHERE npub = ?", (npub,)
-    ).fetchone()['id']
-
-
-def create_verification_challenge(challenge):
-    """Persist an issued ownership challenge, with UTC Unix timestamps."""
-    with _connection() as connection:
-        connection.execute(
-            """INSERT INTO verification_challenges
-               (id, pubkey, challenge, status, created_at, expires_at)
-               VALUES (:id, :pubkey, :challenge, 'issued', :created_at, :expires_at)""",
-            challenge
-        )
-
-
-def get_verification_challenge(challenge_id, now):
-    """Fetch a challenge and persist its expired state when necessary."""
-    with _connection() as connection:
-        connection.execute(
-            """UPDATE verification_challenges SET status = 'expired'
-               WHERE id = ? AND status = 'issued' AND expires_at <= ?""",
-            (challenge_id, now)
-        )
-        challenge = connection.execute(
-            "SELECT * FROM verification_challenges WHERE id = ?", (challenge_id,)
-        ).fetchone()
-        return dict(challenge) if challenge is not None else None
-
-
-def consume_challenge_and_create_player(challenge_id, pubkey):
-    """Atomically redeem a verified challenge and create/load its player.
-
-    Only the caller verifying the signature should invoke this storage helper.
-    Conditional updates prevent concurrent registration attempts from replaying it.
-    """
-    with _connection() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        now = int(time.time())
-        updated = connection.execute(
-            """UPDATE verification_challenges SET status = 'used'
-               WHERE id = ? AND pubkey = ? AND status = 'issued'
-                   AND expires_at > ?""",
-            (challenge_id, pubkey, now)
-        )
-        if updated.rowcount != 1:
-            connection.execute(
-                """UPDATE verification_challenges SET status = 'expired'
-                   WHERE id = ? AND status = 'issued' AND expires_at <= ?""",
-                (challenge_id, now)
-            )
-            return None
-        return _get_or_create_player(connection, pubkey)
+    valid = verify_password(password, player['password_hash'] if player else None)
+    return player['id'] if player is not None and valid else None
 
 
 def get_player_info(player_id):
     """Get player information using the indexed player ID."""
     with _connection() as connection:
         player = connection.execute(
-            """SELECT id, npub, fiat_balance, bitcoin_balance
+            """SELECT id, npub, username, fiat_balance, bitcoin_balance
                FROM players WHERE id = ?""", (player_id,)
         ).fetchone()
         return dict(player) if player is not None else None
-
-
-def mark_payment_paid(player_id, invoice_hash):
-    """Atomically record or update a player's simulated payment."""
-    if player_id is None:
-        raise ValueError("A player ID is required to record payment")
-    with _connection() as connection:
-        connection.execute(
-            """INSERT INTO payments (player_id, paid, invoice_hash, timestamp)
-               VALUES (?, 1, ?, ?)
-               ON CONFLICT(player_id) DO UPDATE SET
-                   paid = excluded.paid,
-                   invoice_hash = excluded.invoice_hash,
-                   timestamp = excluded.timestamp""",
-            (player_id, invoice_hash, datetime.now().isoformat())
-        )
-
-
-def check_payment_status(player_id):
-    """Check whether a player's simulated payment has been recorded."""
-    with _connection() as connection:
-        payment = connection.execute(
-            "SELECT paid FROM payments WHERE player_id = ?", (player_id,)
-        ).fetchone()
-        return bool(payment['paid']) if payment is not None else False
 
 
 if __name__ == "__main__":
