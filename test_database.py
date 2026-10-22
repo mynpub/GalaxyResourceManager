@@ -55,6 +55,13 @@ class DatabaseTests(unittest.TestCase):
             ids = list(executor.map(database.get_or_create_player, ["a" * 64] * 8))
         self.assertEqual(len(set(ids)), 1)
 
+    def test_missing_player_cannot_credit_another_account(self):
+        player_id = database.get_or_create_player("a" * 64)
+        with self.assertRaises(ValueError):
+            database.mark_payment_paid(None, "invalid")
+        self.assertFalse(GameLogic().complete_registration("invalid"))
+        self.assertIs(database.check_payment_status(player_id), False)
+
     def write_legacy_data(self):
         self.data_dir.mkdir()
         (self.data_dir / "players.json").write_text(json.dumps({

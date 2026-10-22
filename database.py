@@ -110,6 +110,8 @@ def get_player_info(player_id):
 
 def mark_payment_paid(player_id, invoice_hash):
     """Atomically record or update a player's simulated payment."""
+    if player_id is None:
+        raise ValueError("A player ID is required to record payment")
     with _connection() as connection:
         connection.execute(
             """INSERT INTO payments (player_id, paid, invoice_hash, timestamp)
