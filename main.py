@@ -2,12 +2,12 @@
 """
 Galaxy Resource Manager - Main Entry Point
 
-A terminal-based MMORPG using SQLite, Nostr npubs, and Lightning payments
+A terminal-based MMORPG with local username/password accounts and free access.
 """
 
 import argparse
-import sys
-import json
+import getpass
+import warnings
 from game_logic import GameLogic
 from database import init_database
 
@@ -15,80 +15,70 @@ def setup_parser():
     """Setup command line argument parser"""
     parser = argparse.ArgumentParser(description='Galaxy Resource Manager - MMORPG')
     parser.add_argument('--init', action='store_true', help='Initialize the database')
-    registration = parser.add_mutually_exclusive_group()
-    registration.add_argument('--register', '--begin-register', dest='begin_register',
-                              action='store_true', help='Begin ownership verification')
-    registration.add_argument('--complete-register', action='store_true',
-                              help='Verify ownership and create an account/invoice')
-    parser.add_argument('--npub', help='Nostr public key for registration')
-    parser.add_argument('--signature', help='BIP-340 Schnorr signature (128 hex characters)')
-    parser.add_argument('--challenge-id', help='Registration challenge ID')
+    authentication = parser.add_mutually_exclusive_group()
+    authentication.add_argument('--register', action='store_true',
+                                help='Create a free account (password prompted securely)')
+    authentication.add_argument('--login', action='store_true',
+                                help='Log in (password prompted securely)')
+    parser.add_argument('--username', help='Username; prompted if omitted (3-32 letters/digits/_)')
     return parser
 
-def main():
+def main(argv=None):
     """Main entry point for the game"""
     print("Galaxy Resource Manager")
     print("=" * 40)
 
     # Parse command line arguments
     parser = setup_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.init and (args.register or args.login or args.username is not None):
+        parser.error("--init cannot be combined with account options")
+    if args.username is not None and not (args.register or args.login):
+        parser.error("--username requires --register or --login")
 
     # Check if initialization is requested
     if args.init:
         print("Initializing database...")
         init_database()
         print("Database initialized successfully!")
-        return
+        return 0
 
     # Initialize the game logic
     game = GameLogic()
     
-    if args.begin_register or args.complete_register:
-        # Handle registration with npub argument
-        if not args.npub:
-            print("Nostr public key required for registration")
-            parser.print_help()
-            sys.exit(1)
-        
-        if args.begin_register:
-            try:
-                challenge = game.begin_registration(args.npub)
-            except ValueError as e:
-                parser.exit(1, f"{e}\n")
-            print("Sign SHA-256 of the exact challenge text using BIP-340 Schnorr.")
-            print("Challenge (JSON; decode escapes before signing):")
-            print(json.dumps(challenge, indent=2))
-            print("Then run --complete-register with --npub, --challenge-id and --signature.")
-            return
-
-        if not args.signature or not args.challenge_id:
-            parser.error("--complete-register requires --signature and --challenge-id")
-        if not game.create_player_account(args.npub, args.signature, args.challenge_id):
-            print("Account creation failed!")
-            sys.exit(1)
-        
-        # Generate invoice for payment
-        print("\nGenerating payment invoice...")
-        invoice = game.generate_lightning_invoice(5000)
-        
-        print(f"\nPlease pay {invoice['amount']} sats to the following Lightning invoice:")
-        print(invoice['invoice'])
-        print("\nPayment processing is simulated; no payment confirmation CLI is available.")
-        return
-        
+    if args.register or args.login:
+        try:
+            username = args.username if args.username is not None else input("Username: ")
+            # Fail closed rather than falling back to an echoed password on non-TTY input.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                password = getpass.getpass("Password: ")
+                if args.register and password != getpass.getpass("Confirm password: "):
+                    print("Passwords do not match.")
+                    return 1
+        except (EOFError, KeyboardInterrupt, getpass.GetPassWarning):
+            print("\nSecure password entry unavailable or cancelled; use an interactive terminal.")
+            return 1
+        success = (game.create_player_account(username, password) if args.register
+                   else game.login(username, password))
+        if not success:
+            return 1
+        player = game.get_player_info()
+        print(f"Welcome, {player['username']}! Your account is ready to play.")
+        print(f"Balance: {player['fiat_balance']} fiat, {player['bitcoin_balance']} bitcoin")
+        return 0
     else:
         # Default interactive mode - display welcome and instructions
         print("Welcome to Galaxy Resource Manager!")
         print("This is a terminal-based MMORPG where you manage resources in space.")
         print()
         print("To create an account:")
-        print("1. Have your Nostr public key (npub) ready")
-        print("2. Run: python main.py --begin-register --npub <your_npub>")
-        print("3. Externally sign the challenge's SHA-256 digest using BIP-340 Schnorr")
-        print("4. Run: python main.py --complete-register --npub <your_npub> "
-              "--challenge-id <id> --signature <hex_signature>")
-        print("5. Pay 5000 sats to the Lightning invoice generated (simulated)")
+        print("  python main.py --register --username <username>")
+        print("To log in:")
+        print("  python main.py --login --username <username>")
+        print("Passwords are entered privately; registration asks for confirmation.")
+        print("Access is free and immediate. Use --help for all options.")
+        return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
