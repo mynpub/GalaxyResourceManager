@@ -15,7 +15,7 @@ DATA_DIR = Path.home() / ".galaxy_resources"
 
 
 def _initialize(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 3:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 4:
         return
 
     # Rebuilding players permits NULL legacy keys without changing child records.
@@ -25,7 +25,14 @@ def _initialize(connection):
         with connection:
             # Another process may have finished initialization while we waited.
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version >= 3:
+            if version >= 4:
+                return
+            if version == 3:
+                import economy
+                economy.initialize(connection)
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise sqlite3.IntegrityError("Database contains invalid references")
+                connection.execute("PRAGMA user_version = 4")
                 return
             if version == 0:
                 _import_legacy_data(connection)
@@ -56,6 +63,11 @@ def _initialize(connection):
             if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise sqlite3.IntegrityError("Legacy data contains invalid references")
             connection.execute("PRAGMA user_version = 3")
+            import economy
+            economy.initialize(connection)
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise sqlite3.IntegrityError("Database contains invalid references")
+            connection.execute("PRAGMA user_version = 4")
     finally:
         connection.execute("PRAGMA foreign_keys = ON")
 
@@ -133,6 +145,8 @@ def create_player(username, password):
                VALUES (?, ?, ?)""",
             (username, password_hash, datetime.now().isoformat())
         )
+        import economy
+        economy.ensure_player(connection, cursor.lastrowid)
         return cursor.lastrowid
 
 

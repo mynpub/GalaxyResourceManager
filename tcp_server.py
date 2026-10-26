@@ -67,14 +67,17 @@ class GameSession(socketserver.StreamRequestHandler):
         self.send("WARNING: Plain TCP sends passwords in cleartext. Your terminal may echo them.")
         self.send("Use signup (or register), login, help, status/profile, or quit.")
         while True:
-            command = self.read("Command (signup/login/help/quit):" if game.player_id is None
-                                else "Command (help/status/profile/quit):").strip().lower()
+            line = self.read("Command (signup/login/help/quit):" if game.player_id is None
+                             else "Command (help/status/profile/quit):").strip()
+            command = line.lower()
             if command == "quit":
                 self.send("Goodbye!")
                 return
             if command == "help":
                 self.send("signup/register: create a free account; login: sign in; "
                           "status/profile: username and balances; quit: disconnect.")
+                if game.player_id is not None:
+                    self.send(game.command("help"))
             elif command in ("signup", "register", "login"):
                 if game.player_id is not None:
                     self.send("Already logged in. Quit to start another session.")
@@ -96,15 +99,10 @@ class GameSession(socketserver.StreamRequestHandler):
                         self.send("Too many failed authentication attempts; disconnecting.")
                         return
             elif command in ("status", "profile"):
-                player = game.get_player_info()
-                if player is None:
-                    self.send("Please signup or login first.")
-                else:
-                    self.send(f"Username: {player['username']}")
-                    self.send(f"Balance: {player['fiat_balance']} fiat, "
-                              f"{player['bitcoin_balance']} bitcoin")
+                self.send(game.command(command))
             else:
-                self.send("Unknown command. Use help.")
+                self.send(game.command(line) if game.player_id is not None
+                          else "Unknown command. Use help.")
 
 
 class TCPGameServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -115,9 +113,14 @@ class TCPGameServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     block_on_close = True
 
     def __init__(self, server_address):
+        from simulation import ServerSimulation
+        self._simulation = ServerSimulation()
         self._clients = set()
         self._clients_lock = Lock()
         super().__init__(server_address, GameSession)
+
+    def service_actions(self):
+        self._simulation.poll()
 
     def process_request(self, request, client_address):
         with self._clients_lock:

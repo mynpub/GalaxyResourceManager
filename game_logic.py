@@ -57,6 +57,11 @@ class GameLogic:
             return None
         return get_player_info(self.player_id)
 
+    def command(self, line):
+        """Dispatch gameplay using this session's identity, never a supplied ID."""
+        from commands import execute
+        return execute(self.player_id, line)
+
 def main():
     """Offer the same registration/login CLI, prompting for an action by default."""
     import sys

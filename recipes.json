@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "status": "Provisional gameplay recipes, not engineering specifications",
+    "mass_unit": "microgram",
+    "time_unit": "second",
+    "xp_skill": "crafting"
+  },
+  "recipes": {
+    "solar_panel": {
+      "inputs": {"Si": 8000000000, "Al": 6000000000, "Cu": 2000000000, "Ag": 20000000},
+      "duration": 60,
+      "xp": 60,
+      "output": "solar_panel",
+      "stats": {"power_watts": 100, "hashrate": 0}
+    },
+    "asic": {
+      "inputs": {"Si": 1500000000, "Cu": 3000000000, "Al": 2000000000, "Au": 8000000, "Sn": 150000000, "Ni": 500000000},
+      "duration": 120,
+      "xp": 120,
+      "output": "asic",
+      "stats": {"power_watts": 100, "hashrate": 1}
+    },
+    "droid": {
+      "inputs": {"Fe": 18000000000, "Al": 6000000000, "Cu": 4000000000, "Si": 600000000, "Ni": 1200000000, "Li": 300000000, "Co": 250000000},
+      "duration": 180,
+      "xp": 180,
+      "output": "droid",
+      "stats": {"efficiency": 1}
+    }
+  }
+}
