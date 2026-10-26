@@ -124,6 +124,21 @@ class TCPServerTests(unittest.TestCase):
         self.assertIn("Login successful",
                       self.authenticate(returning, returning_stream, "login", "spaces", password))
 
+    def test_gameplay_preserves_element_case_and_session_identity(self):
+        from economy import World
+        client, stream = self.connect()
+        self.authenticate(client, stream, "signup", "miner")
+        pid = database.authenticate_player("miner", PASSWORD)
+        World().seed(pid, resources={"Fe": 100})
+        self.send(client, "auction list resource Fe 10 fiat 1")
+        self.assertIn("Auction listed:", self.until_prompt(stream))
+        self.send(client, "auctions")
+        self.assertIn('"asset": "Fe"', self.until_prompt(stream))
+        self.send(client, "inventory 999")
+        self.assertIn("Unexpected arguments", self.until_prompt(stream))
+        self.send(client, "world")
+        self.assertIn("Earth", self.until_prompt(stream))
+
     def test_failed_authentication_attempt_limit(self):
         client, stream = self.connect()
         for attempt in range(tcp_server.MAX_AUTH_FAILURES):

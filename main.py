@@ -9,6 +9,8 @@ import argparse
 import getpass
 import logging
 import warnings
+from pathlib import Path
+import database
 from game_logic import GameLogic
 from database import init_database
 
@@ -26,6 +28,10 @@ def setup_parser():
     parser.add_argument('--host', default='0.0.0.0', help='TCP bind address (default: 0.0.0.0)')
     parser.add_argument('--port', type=int, default=7777, help='TCP port (default: 7777)')
     parser.add_argument('--username', help='Username; prompted if omitted (3-32 letters/digits/_)')
+    parser.add_argument('--play', action='store_true', help='Interactive gameplay after authentication')
+    parser.add_argument('--command', action='append', default=[],
+                        help='Run a gameplay command after authentication (repeatable)')
+    parser.add_argument('--data-dir', type=Path, help='Explicit local storage directory (e.g. a test world)')
     return parser
 
 def main(argv=None):
@@ -40,8 +46,12 @@ def main(argv=None):
         parser.error("--init cannot be combined with account options")
     if args.username is not None and not (args.register or args.login):
         parser.error("--username requires --register or --login")
+    if (args.play or args.command) and not (args.register or args.login):
+        parser.error("--play and --command require --register or --login")
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
+    if args.data_dir is not None:
+        database.DATA_DIR = args.data_dir.expanduser().resolve()
 
     if args.serve_tcp:
         from tcp_server import serve_tcp
@@ -81,7 +91,21 @@ def main(argv=None):
             return 1
         player = game.get_player_info()
         print(f"Welcome, {player['username']}! Your account is ready to play.")
-        print(f"Balance: {player['fiat_balance']} fiat, {player['bitcoin_balance']} bitcoin")
+        print(game.command("status"))
+        for command in args.command:
+            print(game.command(command))
+        if args.play:
+            from simulation import LocalSimulation
+            with LocalSimulation():
+                print(game.command("help"))
+                while True:
+                    try:
+                        command = input("Game> ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        break
+                    if command.lower() == "quit":
+                        break
+                    print(game.command(command))
         return 0
     else:
         # Default interactive mode - display welcome and instructions
