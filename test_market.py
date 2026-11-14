@@ -33,6 +33,8 @@ class MarketTests(unittest.TestCase):
                 economy.credit(c, pid, "fiat", 100_000_000)
                 economy.credit(c, pid, "btc", 100_000)
                 economy.change_resource(c, pid, "Fe", 100_000)
+            bank_id = economy.earth_bank_id(c)
+            c.execute("UPDATE land SET locked=1 WHERE player_id=?", (bank_id,))
         simulation.tick(self.clock)
 
     def query(self, sql, args=()):
@@ -44,6 +46,14 @@ class MarketTests(unittest.TestCase):
 
     def resource(self, player):
         return self.query("SELECT quantity FROM inventory WHERE player_id=? AND symbol='Fe'", (player,))[0]["quantity"]
+
+    def grant_land(self, player, acres):
+        with database._connection() as c:
+            bank_id = economy.earth_bank_id(c)
+            c.execute("UPDATE land SET locked=0 WHERE player_id=?", (bank_id,))
+            land_id = economy._seed_land(c, player, acres)
+            c.execute("UPDATE land SET locked=1 WHERE player_id=?", (bank_id,))
+            return land_id
 
     def miner(self, player):
         with database._connection() as c:
@@ -122,7 +132,7 @@ class MarketTests(unittest.TestCase):
         self.assertFalse(self.query("SELECT * FROM blocks"))
 
     def test_item_and_land_locks_authorization_and_atomic_transfer(self):
-        parcel = self.world.buy_land(1, 2)
+        parcel = self.grant_land(1, 2)
         self.world.seed(1, humans=1, solar_panels=1)
         worker = self.query("SELECT id FROM workers WHERE player_id=1")[0]["id"]
         self.world.assign(1, worker, parcel)
@@ -187,7 +197,7 @@ class MarketTests(unittest.TestCase):
 
     def test_droid_escrow_locks_work_and_transfers_linked_worker(self):
         self.world.seed(1, droids=1)
-        parcel = self.world.buy_land(1, 1)
+        parcel = self.grant_land(1, 1)
         worker = self.query("SELECT * FROM workers WHERE player_id=1")[0]
         item = worker["equipment_id"]
         self.world.assign(1, worker["id"], parcel)
@@ -205,8 +215,44 @@ class MarketTests(unittest.TestCase):
                          {"player_id": 2, "locked": 0, "land_id": None})
         with self.assertRaises(ValueError):
             self.world.assign(1, worker["id"], parcel)
-        buyer_parcel = self.world.buy_land(2, 1)
+        buyer_parcel = self.grant_land(2, 1)
         self.world.assign(2, worker["id"], buyer_parcel)
+
+    def test_earth_bank_partial_bid_escrow_and_supply_demand_reserve(self):
+        with database._connection() as c:
+            bank_id = economy.earth_bank_id(c)
+            c.execute("UPDATE land SET locked=0 WHERE player_id=?", (bank_id,))
+            c.execute("UPDATE accounts SET fiat=800000000 WHERE player_id IN (2,3)")
+        simulation.tick(self.clock)
+        listing = self.query(
+            "SELECT a.*,l.acres FROM auctions a JOIN land l ON l.id=CAST(a.asset AS INTEGER) "
+            "WHERE a.seller=? AND a.status='active'", (bank_id,)
+        )[0]
+        self.assertEqual(listing["acres"], 1000)
+        self.assertEqual(listing["reserve"], 900_000)
+        with self.assertRaisesRegex(ValueError, "1-1000"):
+            self.market.bid(2, listing["id"], 1_000_000, 1001)
+
+        self.market.bid(2, listing["id"], 1_000_000, 400)
+        self.assertEqual(self.balance(2, "fiat"), 400_000_000)
+        self.market.bid(3, listing["id"], 1_100_000, 600)
+        self.assertEqual(self.balance(2, "fiat"), 800_000_000)
+        self.assertEqual(self.balance(3, "fiat"), 140_000_000)
+        self.assertEqual(self.query(
+            "SELECT bid,bid_quantity FROM auctions WHERE id=?", (listing["id"],)
+        )[0], {"bid": 660_000_000, "bid_quantity": 600})
+
+        self.now += auctions.DEFAULT_DURATION
+        simulation.tick(self.clock)
+        buyer_land = self.query(
+            "SELECT acres FROM land WHERE player_id=3 ORDER BY id DESC LIMIT 1"
+        )[0]["acres"]
+        self.assertEqual(buyer_land, 600)
+        self.assertEqual(self.balance(bank_id, "fiat"), 660_000_000)
+        next_listing = self.query(
+            "SELECT reserve FROM auctions WHERE seller=? AND status='active'", (bank_id,)
+        )[0]
+        self.assertEqual(next_listing["reserve"], 594_000)
 
     def test_time_weighting_prevents_last_second_snapshot_and_survives_restart(self):
         self.miner(1)

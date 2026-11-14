@@ -89,7 +89,8 @@ class AuthenticationTests(unittest.TestCase):
                 self.assertFalse(self.game.create_player_account("valid_name", password))
                 self.assert_logged_out()
         with database._connection() as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM players").fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM players WHERE username IS NOT NULL").fetchone()[0], 0)
 
     def test_password_boundaries_unicode_and_whitespace_are_exact(self):
         for index, password in enumerate(("x" * 12, "x" * 128, " 密碼 passphrase ")):
@@ -104,7 +105,8 @@ class AuthenticationTests(unittest.TestCase):
         first = database.create_player("first", PASSWORD)
         database.create_player("second", PASSWORD)
         with database._connection() as connection:
-            hashes = [row[0] for row in connection.execute("SELECT password_hash FROM players")]
+            hashes = [row[0] for row in connection.execute(
+                "SELECT password_hash FROM players WHERE username IS NOT NULL")]
         self.assertNotEqual(*hashes)
         for encoded in hashes:
             scheme, iterations, salt, digest = encoded.split("$")

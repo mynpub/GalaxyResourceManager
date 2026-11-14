@@ -21,6 +21,7 @@ def catch_up(c, now, max_events=MAX_EVENTS):
     state = c.execute("SELECT * FROM chain WHERE id=1").fetchone()
     if state["epoch"] is None:
         c.execute("UPDATE chain SET epoch=?,last_tick=? WHERE id=1", (now, now))
+        auctions.ensure_earth_bank_listing(c, now)
         return True
     if now < state["last_tick"]:
         raise ValueError("Clock moved backwards; simulation paused")
@@ -32,6 +33,7 @@ def catch_up(c, now, max_events=MAX_EVENTS):
             continue
         if not auctions.close_due(c, current):
             continue
+        auctions.ensure_earth_bank_listing(c, current)
         next_block = state["epoch"] + (state["height"] + 1) * blockchain.INTERVAL
         if current == next_block:
             blockchain.process_block(c)

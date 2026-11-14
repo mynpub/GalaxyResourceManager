@@ -12,15 +12,17 @@ from economy import World, integer, ensure_player
 from simulation import tick
 
 HELP = """world | land | inventory/resources | workers | skills | jobs | equipment | power/hashrate
-land buy ACRES | land sell PARCEL_ID
+land buy AUCTION_ID ACRES PRICE_PER_ACRE | land sell PARCEL_ID
 assign WORKER_ID PARCEL_ID|none
 craft solar_panel|asic|droid
 equip ITEM_ID install|uninstall|on|off
 chain (block schedule, hashrates, queue and your reward ledger)
 auctions (Earth market and your last 100 settlement records)
 auction list resource|item|land SYMBOL_OR_ID QUANTITY fiat|btc RESERVE [FEE_SATS] [SECONDS]
-auction bid AUCTION_ID AMOUNT | auction cancel AUCTION_ID
+auction bid AUCTION_ID AMOUNT [ACRES] | auction cancel AUCTION_ID
+bank wealth (Earth Bank fiat, bitcoin and land reserve)
 Prices: integer microfiat or satoshis. Resources: integer micrograms.
+For Earth Bank land, bid amount is per acre and total escrow is amount times acres.
 Listed land/items must be idle/uninstalled. Bitcoin fees are reserved from the seller.
 status/profile | help | quit
 New accounts receive nothing. Production bootstrap is unresolved; see README for opt-in local seeding."""
@@ -61,13 +63,19 @@ def execute(player, line):
         tick()
         world = World()
         market = AuctionHouse()
+        if command == "land" and len(args) == 4 and args[0] == "buy":
+            market.bid(player, integer(args[1], "auction ID"),
+                       integer(args[3], "price per acre"), integer(args[2], "acres"))
+            return "Earth Bank land bid escrow reserved."
         if command == "land" and len(args) == 2:
             if args[0] == "buy":
-                result = world.buy_land(player, integer(args[1], "acres"))
+                raise ValueError("Use land buy AUCTION_ID ACRES PRICE_PER_ACRE")
             elif args[0] == "sell":
                 result = world.sell_land(player, integer(args[1], "parcel ID"))
             else:
-                raise ValueError("Use land buy ACRES or land sell PARCEL_ID")
+                raise ValueError(
+                    "Use land buy AUCTION_ID ACRES PRICE_PER_ACRE or land sell PARCEL_ID"
+                )
             return f"Land updated: {result}"
         if command == "assign" and len(args) == 2:
             world.assign(player, integer(args[0], "worker ID"),
@@ -93,14 +101,16 @@ def execute(player, line):
                     player, args[1], args[2], integer(args[3]), args[4],
                     integer(args[5], "reserve"), fee, **kwargs)
                 return f"Auction listed: {result}"
-            if args[0] == "bid" and len(args) == 3:
-                market.bid(player, integer(args[1], "auction ID"), integer(args[2], "bid"))
+            if args[0] == "bid" and len(args) in (3, 4):
+                acreage = integer(args[3], "acres") if len(args) == 4 else None
+                market.bid(player, integer(args[1], "auction ID"),
+                           integer(args[2], "bid"), acreage)
                 return "Bid escrow reserved."
             if args[0] == "cancel" and len(args) == 2:
                 market.cancel(player, integer(args[1], "auction ID"))
                 return "Auction cancelled; escrow released."
             raise ValueError("Invalid auction arguments; use help")
-        if args:
+        if args and not (command == "bank" and args == ["wealth"]):
             raise ValueError("Unexpected arguments; use help")
         if command == "auctions":
             return json.dumps(market.listings(player), indent=2)
@@ -111,6 +121,19 @@ def execute(player, line):
                 username = c.execute("SELECT username FROM players WHERE id=?", (player,)).fetchone()[0]
                 return (f"Username: {username}\nBalance: {fixed(row['fiat'], 1_000_000)} fiat, "
                         f"{fixed(row['btc'], 100_000_000)} bitcoin (available; excludes escrow)")
+            if command == "bank" and args in ([], ["wealth"]):
+                bank = c.execute(
+                    "SELECT p.id,a.fiat,a.btc FROM system_accounts s "
+                    "JOIN players p ON p.id=s.player_id "
+                    "JOIN accounts a ON a.player_id=p.id WHERE s.name='Earth Bank'"
+                ).fetchone()
+                land_acres = c.execute(
+                    "SELECT coalesce(sum(acres),0) FROM land WHERE player_id=?",
+                    (bank["id"],)
+                ).fetchone()[0]
+                return (f"Earth Bank wealth: {fixed(bank['fiat'], 1_000_000)} fiat, "
+                        f"{fixed(bank['btc'], 100_000_000)} bitcoin, "
+                        f"{land_acres} acres of land.")
             if command == "chain":
                 result = chain_status(c, player)
             elif command in ("inventory", "resources"):

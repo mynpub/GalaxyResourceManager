@@ -4,6 +4,7 @@ import json
 import re
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from decimal import Decimal, ROUND_FLOOR, localcontext
 from pathlib import Path
 
@@ -17,6 +18,11 @@ RECIPES = json.loads(Path(__file__).with_name("recipes.json").read_text())["reci
 MAX_INTEGER = 2 ** 63 - 1
 MAX_SEED_COUNT = 10000
 JOB_BATCH = 1500
+EARTH_BANK_NAME = "Earth Bank"
+EARTH_BANK_NPUB = "system:earth_bank"
+EARTH_BANK_LOT_ACRES = 1000
+EARTH_BANK_AUCTION_DURATION = 3600
+EARTH_BANK_PRICE_WINDOW = 30 * 86400
 
 
 def integer(value, name="quantity", minimum=1):
@@ -45,7 +51,7 @@ def _legacy(value, scale, name):
 
 
 def initialize(c):
-    """Schema v4, inside database's locked, rollback-safe migration."""
+    """Create the v4 economy schema inside the locked, rollback-safe migration."""
     statements = [
         """CREATE TABLE accounts (
             player_id INTEGER PRIMARY KEY REFERENCES players(id),
@@ -104,6 +110,76 @@ def initialize(c):
     import auctions
     blockchain.initialize(c)
     auctions.initialize(c)
+
+
+def migrate_v5(c):
+    """Create the Earth Bank and move unowned Earth acreage into its reserve."""
+    c.execute(
+        "ALTER TABLE auctions ADD COLUMN bid_quantity INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(bid_quantity >= 0)"
+    )
+    c.execute("""CREATE TABLE system_accounts (
+        name TEXT PRIMARY KEY, player_id INTEGER NOT NULL UNIQUE REFERENCES players(id))""")
+
+    npub = EARTH_BANK_NPUB
+    suffix = 0
+    while c.execute("SELECT 1 FROM players WHERE npub=?", (npub,)).fetchone():
+        suffix += 1
+        npub = f"{EARTH_BANK_NPUB}:{suffix}"
+    if not c.execute("SELECT 1 FROM players WHERE id=0").fetchone():
+        c.execute("INSERT INTO players(id,npub,created_at) VALUES (0,?,?)",
+                  (npub, datetime.now().isoformat()))
+        player_id = 0
+    else:
+        player_id = c.execute(
+            "INSERT INTO players(npub,created_at) VALUES (?,?)",
+            (npub, datetime.now().isoformat())
+        ).lastrowid
+    c.execute("INSERT INTO system_accounts(name,player_id) VALUES (?,?)",
+              (EARTH_BANK_NAME, player_id))
+    ensure_player(c, player_id)
+
+    supply = c.execute("SELECT total_acres FROM planets WHERE name='Earth'").fetchone()[0]
+    allocated = c.execute(
+        "SELECT coalesce(sum(acres),0) FROM land WHERE planet='Earth'"
+    ).fetchone()[0]
+    if allocated > supply:
+        raise sqlite3.IntegrityError("Earth land allocation exceeds total supply")
+    if supply > allocated:
+        c.execute("INSERT INTO land(player_id,planet,acres) VALUES (?,'Earth',?)",
+                  (player_id, supply - allocated))
+
+
+def earth_bank_id(c):
+    row = c.execute("SELECT player_id FROM system_accounts WHERE name=?",
+                    (EARTH_BANK_NAME,)).fetchone()
+    if row is None:
+        raise ValueError("Earth Bank is not initialized")
+    return row["player_id"]
+
+
+def _seed_land(c, pid, acres):
+    bank_id = earth_bank_id(c)
+    remaining = acres
+    parcels = c.execute(
+        "SELECT id,acres FROM land WHERE player_id=? AND planet='Earth' AND locked=0 "
+        "ORDER BY id",
+        (bank_id,)
+    ).fetchall()
+    if sum(parcel["acres"] for parcel in parcels) < acres:
+        raise ValueError("Not enough Earth Bank land")
+    for parcel in parcels:
+        take = min(remaining, parcel["acres"])
+        if take == parcel["acres"]:
+            c.execute("DELETE FROM land WHERE id=?", (parcel["id"],))
+        else:
+            c.execute("UPDATE land SET acres=acres-? WHERE id=?",
+                      (take, parcel["id"]))
+        remaining -= take
+        if not remaining:
+            break
+    return c.execute("INSERT INTO land(player_id,acres) VALUES (?,?)",
+                     (pid, acres)).lastrowid
 
 
 def ensure_player(c, pid):
@@ -258,20 +334,15 @@ class World:
             for skill in result["skills"]:
                 skill["level"] = catalog.level(skill["xp"])
             result["effective_hash"] = effective_hash(c).get(pid, 0)
+            bank_id = earth_bank_id(c)
             result["available_land"] = c.execute(
-                "SELECT total_acres-(SELECT coalesce(sum(acres),0) FROM land WHERE planet='Earth') "
-                "FROM planets WHERE name='Earth'").fetchone()[0]
+                "SELECT coalesce(sum(acres),0) FROM land WHERE player_id=?",
+                (bank_id,)
+            ).fetchone()[0]
             return result
 
     def buy_land(self, pid, acres):
-        acres = integer(acres, "acres")
-        with self._transaction(pid) as c:
-            supply = c.execute("SELECT total_acres FROM planets WHERE name='Earth'").fetchone()[0]
-            used = c.execute("SELECT coalesce(sum(acres),0) FROM land WHERE planet='Earth'").fetchone()[0]
-            if acres > supply - used:
-                raise ValueError("Not enough Earth land")
-            debit(c, pid, "fiat", acres * LAND_PRICE)
-            return c.execute("INSERT INTO land(player_id,acres) VALUES (?,?)", (pid, acres)).lastrowid
+        raise ValueError("Earth land is sold through Earth Bank auctions; use auction bid")
 
     def sell_land(self, pid, land_id):
         land_id = integer(land_id, "land_id")
@@ -280,8 +351,10 @@ class World:
                             (land_id, pid)).fetchone()
             if row is None or c.execute("SELECT 1 FROM workers WHERE land_id=?", (land_id,)).fetchone():
                 raise ValueError("Land is unavailable or has assigned workers")
+            bank_id = earth_bank_id(c)
+            debit(c, bank_id, "fiat", row["acres"] * LAND_PRICE)
             credit(c, pid, "fiat", row["acres"] * LAND_PRICE)
-            c.execute("DELETE FROM land WHERE id=?", (land_id,))
+            c.execute("UPDATE land SET player_id=? WHERE id=?", (bank_id, land_id))
 
     def assign(self, pid, worker_id, land_id):
         worker_id = integer(worker_id, "worker_id")
@@ -368,11 +441,7 @@ class World:
             credit(c, pid, "btc", btc)
             acres = integer(acres, "acres", 0)
             if acres:
-                supply = c.execute("SELECT total_acres FROM planets WHERE name='Earth'").fetchone()[0]
-                used = c.execute("SELECT coalesce(sum(acres),0) FROM land WHERE planet='Earth'").fetchone()[0]
-                if acres > supply - used:
-                    raise ValueError("Not enough Earth land")
-                c.execute("INSERT INTO land(player_id,acres) VALUES (?,?)", (pid, acres))
+                _seed_land(c, pid, acres)
             for symbol, quantity in (resources or {}).items():
                 change_resource(c, pid, symbol, integer(quantity, minimum=0))
             for kind in ("human", "droid"):
