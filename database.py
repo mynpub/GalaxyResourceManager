@@ -15,7 +15,7 @@ DATA_DIR = Path.home() / ".galaxy_resources"
 
 
 def _initialize(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 4:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 5:
         return
 
     # Rebuilding players permits NULL legacy keys without changing child records.
@@ -25,7 +25,14 @@ def _initialize(connection):
         with connection:
             # Another process may have finished initialization while we waited.
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version >= 4:
+            if version >= 5:
+                return
+            if version == 4:
+                import economy
+                economy.migrate_v5(connection)
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise sqlite3.IntegrityError("Database contains invalid references")
+                connection.execute("PRAGMA user_version = 5")
                 return
             if version == 3:
                 import economy
@@ -33,6 +40,10 @@ def _initialize(connection):
                 if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise sqlite3.IntegrityError("Database contains invalid references")
                 connection.execute("PRAGMA user_version = 4")
+                economy.migrate_v5(connection)
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise sqlite3.IntegrityError("Database contains invalid references")
+                connection.execute("PRAGMA user_version = 5")
                 return
             if version == 0:
                 _import_legacy_data(connection)
@@ -68,6 +79,10 @@ def _initialize(connection):
             if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise sqlite3.IntegrityError("Database contains invalid references")
             connection.execute("PRAGMA user_version = 4")
+            economy.migrate_v5(connection)
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise sqlite3.IntegrityError("Database contains invalid references")
+            connection.execute("PRAGMA user_version = 5")
     finally:
         connection.execute("PRAGMA foreign_keys = ON")
 

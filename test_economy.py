@@ -1,4 +1,4 @@
-"""Focused Earth economy, integer accounting, and v4 migration regression tests."""
+"""Focused Earth economy, integer accounting, and v5 migration regression tests."""
 
 import sqlite3
 import tempfile
@@ -39,6 +39,12 @@ class EconomyTests(unittest.TestCase):
         self.assertEqual(snapshot["workers"], [])
         self.assertEqual(snapshot["equipment"], [])
         self.assertEqual(snapshot["available_land"], economy.LAND_SUPPLY)
+        with database._connection() as c:
+            bank_id = economy.earth_bank_id(c)
+            self.assertEqual(c.execute(
+                "SELECT sum(acres) FROM land WHERE player_id=?", (bank_id,)
+            ).fetchone()[0], economy.LAND_SUPPLY)
+            self.assertEqual(snapshot["land"], [])
         with self.assertRaises(ValueError):
             self.world.buy_land(self.pid, 1)
         new_id = database.create_player("newcomer", "a long test password")
@@ -66,7 +72,9 @@ class EconomyTests(unittest.TestCase):
             for currency, amount in (("fiat", 7), ("fiat", -1), ("bitcoin", 1)):
                 with self.assertRaises(ValueError):
                     economy.debit(c, self.pid, currency, amount)
-            self.assertEqual(c.execute("SELECT fiat FROM accounts").fetchone()[0], 6)
+            self.assertEqual(c.execute(
+                "SELECT fiat FROM accounts WHERE player_id=?", (self.pid,)
+            ).fetchone()[0], 6)
             with self.assertRaises(ValueError):
                 economy.credit(c, self.pid, "fiat", economy.MAX_INTEGER)
             for field, value in (("fiat", -1), ("btc", 0.5)):
@@ -74,8 +82,8 @@ class EconomyTests(unittest.TestCase):
                     c.execute(f"UPDATE accounts SET {field}=?", (value,))
 
     def test_land_worker_capacity_ownership_and_escrow(self):
-        self.world.seed(self.pid, fiat=3000000, humans=2)
-        land = self.world.buy_land(self.pid, 1)
+        self.world.seed(self.pid, fiat=3000000, humans=2, acres=1)
+        land = self.world.snapshot(self.pid)["land"][0]["id"]
         workers = self.world.snapshot(self.pid)["workers"]
         self.world.assign(self.pid, workers[0]["id"], land)
         self.world.assign(self.pid, workers[0]["id"], land)
@@ -92,29 +100,28 @@ class EconomyTests(unittest.TestCase):
             self.world.assign(self.pid, workers[0]["id"], land)
         with database._connection() as c:
             c.execute("UPDATE land SET locked=0 WHERE id=?", (land,))
+            bank_id = economy.earth_bank_id(c)
+            economy.credit(c, bank_id, "fiat", economy.LAND_PRICE)
         self.world.sell_land(self.pid, land)
-        self.assertEqual(self.world.snapshot(self.pid)["balances"]["fiat"], 3000000)
+        self.assertEqual(self.world.snapshot(self.pid)["balances"]["fiat"],
+                         3000000 + economy.LAND_PRICE)
 
-    def test_finite_land_includes_locked_and_concurrent_buyers(self):
-        self.world.seed(self.pid, fiat=2000000)
+    def test_seed_transfers_existing_supply_from_earth_bank(self):
+        self.world.seed(self.pid, acres=2)
         with database._connection() as c:
-            c.execute("UPDATE planets SET total_acres=1")
-        def buy(_):
-            try:
-                return self.world.buy_land(self.pid, 1)
-            except ValueError:
-                return None
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            self.assertEqual(sum(x is not None for x in pool.map(buy, range(2))), 1)
-        with database._connection() as c:
-            c.execute("UPDATE land SET locked=1")
-        with self.assertRaises(ValueError):
-            self.world.buy_land(self.pid, 1)
-        self.assertEqual(self.world.snapshot(self.pid)["balances"]["fiat"], 1000000)
+            bank_id = economy.earth_bank_id(c)
+            bank_acres = c.execute(
+                "SELECT coalesce(sum(acres),0) FROM land WHERE player_id=?", (bank_id,)
+            ).fetchone()[0]
+            world_acres = c.execute(
+                "SELECT coalesce(sum(acres),0) FROM land"
+            ).fetchone()[0]
+        self.assertEqual(bank_acres + 2, economy.LAND_SUPPLY)
+        self.assertEqual(world_acres, economy.LAND_SUPPLY)
 
     def test_gather_partition_invariant_and_exact_fractional_mass(self):
-        self.world.seed(self.pid, fiat=1000000, humans=1)
-        land = self.world.buy_land(self.pid, 1)
+        self.world.seed(self.pid, fiat=1000000, humans=1, acres=1)
+        land = self.world.snapshot(self.pid)["land"][0]["id"]
         worker = self.world.snapshot(self.pid)["workers"][0]["id"]
         self.world.assign(self.pid, worker, land)
         with database._connection() as c:
@@ -122,7 +129,10 @@ class EconomyTests(unittest.TestCase):
             economy.advance(c, 1001, 1007)
             split = [tuple(r) for r in c.execute(
                 "SELECT symbol,quantity,carry FROM inventory ORDER BY symbol")]
-            mining_xp = c.execute("SELECT xp FROM skills WHERE name='mining'").fetchone()[0]
+            mining_xp = c.execute(
+                "SELECT xp FROM skills WHERE player_id=? AND name='mining'",
+                (self.pid,)
+            ).fetchone()[0]
             self.assertEqual(mining_xp, 7)
             total = sum(catalog.ABUNDANCE.values())
             self.assertEqual(sum(quantity * total + carry for _, quantity, carry in split),
@@ -209,7 +219,8 @@ class EconomyTests(unittest.TestCase):
             self.assertEqual(c.execute("SELECT count(*) FROM equipment").fetchone()[0], 1)
             self.assertEqual(c.execute("SELECT status FROM jobs").fetchone()[0], "completed")
             self.assertEqual(c.execute(
-                "SELECT xp FROM skills WHERE name='crafting'").fetchone()[0],
+                "SELECT xp FROM skills WHERE player_id=? AND name='crafting'",
+                (self.pid,)).fetchone()[0],
                 economy.RECIPES["asic"]["xp"])
 
     def test_job_completion_is_bounded_and_resumable(self):
@@ -282,15 +293,15 @@ class EconomyTests(unittest.TestCase):
             self.world.set_enabled(self.pid, item_id, 1)
 
     def test_catch_up_backlog_blocks_mutation(self):
-        self.world.seed(self.pid, fiat=1000000)
+        self.world.seed(self.pid, resources=economy.RECIPES["asic"]["inputs"])
         with patch("simulation.catch_up", return_value=False):
             with self.assertRaisesRegex(ValueError, "catching up"):
-                self.world.buy_land(self.pid, 1)
+                self.world.craft(self.pid, "asic")
         self.assertEqual(self.world.snapshot(self.pid)["land"], [])
 
     def test_other_player_assets_cannot_be_used(self):
-        self.world.seed(self.pid, fiat=1000000, humans=1, asics=1)
-        parcel = self.world.buy_land(self.pid, 1)
+        self.world.seed(self.pid, fiat=1000000, humans=1, asics=1, acres=1)
+        parcel = self.world.snapshot(self.pid)["land"][0]["id"]
         snap = self.world.snapshot(self.pid)
         other = database.create_player("outsider", "a long test password")
         with self.assertRaises(ValueError):
@@ -361,15 +372,18 @@ class MigrationTests(unittest.TestCase):
         database.init_database()
         database.init_database()
         with database._connection() as c:
-            a = c.execute("SELECT * FROM accounts").fetchone()
+            a = c.execute("SELECT * FROM accounts WHERE player_id=7").fetchone()
             self.assertEqual(a["fiat"], 12123456)
             self.assertEqual(a["btc"], 1)
             self.assertEqual(Decimal(a["legacy_fiat_remainder"]) + Decimal(a["fiat"]) / 1000000,
                              Decimal("12.123456789"))
             self.assertEqual(Decimal(a["legacy_btc_remainder"]) + Decimal(a["btc"]) / 100000000,
                              Decimal("0.000000019"))
-            self.assertEqual(c.execute("SELECT fiat_balance FROM players").fetchone()[0], 12.123456789)
-            self.assertEqual(c.execute("SELECT count(*) FROM inventory").fetchone()[0], 118)
+            self.assertEqual(c.execute(
+                "SELECT fiat_balance FROM players WHERE id=7").fetchone()[0], 12.123456789)
+            self.assertEqual(c.execute(
+                "SELECT count(*) FROM inventory WHERE player_id=7"
+            ).fetchone()[0], 118)
             self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_invalid_migration_rolls_back_schema_version_and_data(self):
@@ -399,10 +413,54 @@ class MigrationTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda _: database.init_database(), range(8)))
         with database._connection() as c:
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 4)
-            self.assertEqual(c.execute("SELECT fiat,btc FROM accounts").fetchone()[:],
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(c.execute("SELECT fiat,btc FROM accounts WHERE player_id=7").fetchone()[:],
                              (3250000, 50000000))
-            self.assertEqual(c.execute("SELECT count(*) FROM inventory").fetchone()[0], 118)
+            self.assertEqual(c.execute(
+                "SELECT count(*) FROM inventory WHERE player_id=7"
+            ).fetchone()[0], 118)
+
+    def test_v4_upgrade_assigns_unowned_land_to_earth_bank(self):
+        with sqlite3.connect(self.directory / "galaxy_resources.db") as c:
+            c.executescript("""
+                CREATE TABLE players (
+                    id INTEGER PRIMARY KEY, npub TEXT UNIQUE, created_at TEXT NOT NULL);
+                CREATE TABLE accounts (
+                    player_id INTEGER PRIMARY KEY REFERENCES players(id),
+                    fiat INTEGER NOT NULL DEFAULT 0, btc INTEGER NOT NULL DEFAULT 0,
+                    legacy_fiat_remainder TEXT NOT NULL DEFAULT '0',
+                    legacy_btc_remainder TEXT NOT NULL DEFAULT '0');
+                CREATE TABLE inventory (
+                    player_id INTEGER NOT NULL REFERENCES players(id), symbol TEXT NOT NULL,
+                    quantity INTEGER NOT NULL DEFAULT 0, carry INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(player_id,symbol));
+                CREATE TABLE skills (
+                    player_id INTEGER NOT NULL REFERENCES players(id), name TEXT NOT NULL,
+                    xp INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(player_id,name));
+                CREATE TABLE planets(name TEXT PRIMARY KEY,total_acres INTEGER NOT NULL);
+                CREATE TABLE land (
+                    id INTEGER PRIMARY KEY,player_id INTEGER NOT NULL REFERENCES players(id),
+                    planet TEXT NOT NULL,acres INTEGER NOT NULL,locked INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE auctions(id INTEGER PRIMARY KEY);
+                INSERT INTO players VALUES (7,'legacy','date');
+                INSERT INTO accounts(player_id,fiat,btc) VALUES (7,123,456);
+                INSERT INTO planets VALUES ('Earth',36800000000);
+                INSERT INTO land(id,player_id,planet,acres) VALUES (1,7,'Earth',100);
+                PRAGMA user_version=4;
+            """)
+        database.init_database()
+        with database._connection() as c:
+            bank_id = economy.earth_bank_id(c)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(c.execute(
+                "SELECT player_id,acres FROM land WHERE id=1"
+            ).fetchone()[:], (7, 100))
+            self.assertEqual(c.execute(
+                "SELECT sum(acres) FROM land WHERE player_id=?", (bank_id,)
+            ).fetchone()[0], economy.LAND_SUPPLY - 100)
+            self.assertEqual(c.execute(
+                "SELECT fiat,btc FROM accounts WHERE player_id=7"
+            ).fetchone()[:], (123, 456))
 
     def test_v3_orphan_payment_aborts_and_rolls_back_entire_upgrade(self):
         self.legacy(1, 0)
@@ -420,7 +478,7 @@ class MigrationTests(unittest.TestCase):
             c.execute("DELETE FROM payments")
         database.init_database()
         with database._connection() as c:
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 5)
             self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_v1_rebuild_and_v4_failure_are_one_transaction(self):

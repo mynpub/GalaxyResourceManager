@@ -11,7 +11,7 @@ an immediately usable account. No signup payment or activation step is required.
 The current implementation is an Earth-only playable vertical slice with
 gathering, crafting, power, simulated Bitcoin blocks and escrowed auctions.
 It is not a production-balanced game: signup grants nothing, and production
-land/workforce acquisition and the bootstrap economy remain unresolved.
+workforce acquisition and the bootstrap economy remain unresolved.
 
 ## Features
 
@@ -21,7 +21,8 @@ land/workforce acquisition and the bootstrap economy remain unresolved.
 - Salted PBKDF2-HMAC-SHA256 password storage
 - Transaction-safe SQLite storage and legacy migration
 - Persistent player IDs and in-game fiat/bitcoin balances
-- Earth land, all 118 elemental inventory records, workers and Mining/Crafting
+- Earth Bank NPC land auctions, all 118 elemental inventory records, workers and
+  Mining/Crafting
 - Timed recipes, installed solar/ASIC equipment and exact-satoshi simulated mining
 - Earth auctions with asset, bid and seller-fee escrow
 - Database-serialized simulation, bounded offline catch-up and reward history
@@ -78,7 +79,8 @@ Hosted sessions use the same commands after login. `help` lists syntax:
 
 ```text
 world                         land
-land buy ACRES                land sell PARCEL_ID
+land buy AUCTION_ID ACRES PRICE_PER_ACRE
+land sell PARCEL_ID           bank wealth
 inventory                     resources
 workers                       assign WORKER_ID PARCEL_ID|none
 skills                        craft solar_panel|asic|droid
@@ -87,7 +89,7 @@ equip ITEM_ID install|uninstall|on|off
 power                         hashrate
 chain                         auctions
 auction list resource|item|land SYMBOL_OR_ID QUANTITY fiat|btc RESERVE [FEE_SATS] [SECONDS]
-auction bid AUCTION_ID AMOUNT
+auction bid AUCTION_ID AMOUNT [ACRES]
 auction cancel AUCTION_ID
 status                        quit
 ```
@@ -96,6 +98,8 @@ Quantities are **integer micrograms** (1 kg = 1,000,000,000 micrograms);
 prices/bids are **integer microfiat** (1 fiat = 1,000,000 microfiat) or **satoshis**
 (1 BTC = 100,000,000 satoshis). Inventory also displays mg/g/kg. IDs come from
 the corresponding list commands. Symbols are case-sensitive (`Fe`, not `fe`).
+For Earth Bank listings, `AMOUNT` is the per-acre fiat bid and `ACRES` is the
+requested amount; the total (`AMOUNT × ACRES`) is escrowed when the bid is placed.
 Commands never accept an acting player ID; authorization comes from the session.
 
 ### Explicit test-world walkthrough (not production bootstrap)
@@ -124,7 +128,9 @@ or treat a seeded world's balances as a finite-supply Bitcoin experiment.**
 At the game prompt:
 
 ```text
-land buy 1
+bank wealth
+auctions
+auction bid AUCTION_ID 900000 1
 land
 workers
 assign 1 1
@@ -135,7 +141,9 @@ jobs
 inventory
 ```
 
-Use the actual IDs displayed. Wait for the configured recipe durations, then
+Use the active Earth Bank listing ID shown by `auctions`; the example bid is
+for one acre at the initial 900,000-microfiat-per-acre reserve. Wait for the
+configured recipe durations, then
 inspect `equipment`, install the panel and ASIC with `equip ID install`, and
 inspect `power` and `chain`. `equip ID off` disables an installed item;
 `uninstall` disables and removes it. Assign the completed droid to another
@@ -145,7 +153,7 @@ test account can bid on listings, for example:
 
 ```text
 auction list resource Fe 1000 fiat 1000000 0 60
-auction bid 1 1000000
+auction bid AUCTION_ID 1000000
 ```
 
 Run a disposable TCP world with
@@ -157,11 +165,22 @@ No live deployment, firewall or service changes are made by the implementation.
 
 These are configurable **tuning defaults**, not user-approved balance decisions:
 
-- Only Earth is active: **36,800,000,000 whole land acres**. Sea is disabled.
+- Only Earth is active: **36,800,000,000 whole land acres**, initially held by
+  the NPC **Earth Bank**. Sea is disabled. The Bank keeps one listing of up to
+  **1,000 acres** on the auction house at a time; each bidder chooses **1–1,000
+  acres** and bids a fiat price per acre. The highest per-acre bid wins at the
+  one-hour close, and the total bid (`price × acres`) is escrowed immediately.
+  The winner receives only the selected acreage; the remainder returns to the
+  Bank's reserve. Bank land is fiat-only. Its reserve is 10% below an adjusted
+  reference price: the acreage-weighted average price per acre from completed
+  fiat land auctions in the last 30 days, multiplied by recent acres sold
+  divided by the Bank's currently listed acreage. Before the first completed
+  sale, the reference falls back to the existing 1 fiat/acre baseline.
+  `bank wealth` shows the Bank's fiat, bitcoin, and land reserve. A direct
+  `land sell` returns unassigned land to the Bank at 1 fiat/acre, subject to
+  the Bank having enough fiat.
   Planet-keyed land and auctions leave room for future worlds without activating
-  any. A provisional primary-market price is **1 fiat/acre**, also the sell-back
-  price; resale removes a parcel and returns its acres to available supply.
-  Assigned or auction-locked land cannot be sold. One worker per owned acre.
+  any. Assigned or auction-locked land cannot be sold. One worker per owned acre.
 - Humans and droids each gather **1 mg/second**, with equal efficiency, no
   level-based speed bonus and no upkeep for this slice. Human recruitment/pricing is **unimplemented**;
   only explicit operator test grants currently create humans. Workers must be
@@ -205,10 +224,11 @@ These are configurable **tuning defaults**, not user-approved balance decisions:
   refunded immediately. Cancellation is allowed only while active, even with
   bids; at closing, no-bid auctions expire/refund, fiat sales settle immediately,
   and BTC sales enter irrevocable pending settlement. No cancellation after
-  closing. Item/land sales transfer whole records; land must be unassigned and
+  closing. Player-listed items/land transfer whole records; Earth Bank lots
+  support partial-acre purchases. Land must be unassigned and
   equipment uninstalled. Listed resources are removed from available inventory.
   BTC sellers separately reserve their chosen **absolute satoshi fee at listing**.
-- Workers/acre, recruitment, initial pricing, long-term balance, richer
+- Workers/acre, recruitment, long-term balance, richer
   planetary geology, weather, crafting concurrency limits and economic sinks
   remain open production decisions. There is no direct player-to-player transfer,
   real Bitcoin, external payment API or external payout.
@@ -397,7 +417,7 @@ GalaxyResourceManager/
 ## Storage and legacy migration
 
 Storage lives at `~/.galaxy_resources/galaxy_resources.db`. Back it up before
-upgrading. Schema version 4 upgrades earlier SQLite versions automatically.
+upgrading. Schema version 5 upgrades earlier SQLite versions automatically.
 The player table is rebuilt transactionally to allow new accounts without a
 legacy public key, while copying existing IDs, public keys, creation dates, and
 balances unchanged. Payment rows and any existing verification challenges remain
@@ -417,6 +437,10 @@ REAL precision cannot be recovered. Negative/nonfinite/overflowing legacy
 balances abort migration for operator resolution rather than silently losing
 value. Every player gets missing elemental records at zero without replacing
 existing holdings. Normal signup initializes all records in one transaction.
+
+The v5 migration creates the non-login Earth Bank NPC and assigns it any
+previously unallocated Earth acreage; existing player-owned parcels remain
+unchanged. New worlds therefore begin with all Earth land in the Bank's reserve.
 
 **Legacy Nostr accounts have no passwords or usernames.** Their credentials
 cannot be inferred. They remain preserved but cannot log in through the new

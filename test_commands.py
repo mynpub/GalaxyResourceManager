@@ -34,7 +34,7 @@ class GameplayCommandTests(unittest.TestCase):
         self.assertIn("0.0 fiat, 0.0 bitcoin", self.game.command("status"))
         self.assertEqual({s["level"] for s in json.loads(self.game.command("skills"))}, {1})
         self.assertIn("auction list", self.game.command("help"))
-        self.assertIn("integer", self.game.command("land buy 1.5"))
+        self.assertIn("integer", self.game.command("land buy invalid 1 900000"))
         self.assertIn("Unexpected", self.game.command("inventory 999"))
         self.assertIn("No closing quotation", self.game.command('craft "'))
         self.assertIn("Please signup", GameLogic().command("inventory"))
@@ -44,16 +44,36 @@ class GameplayCommandTests(unittest.TestCase):
 
     def test_world_mutators_auction_and_private_inventory(self):
         World().seed(self.game.player_id, fiat=5_000_000, resources={"Fe": 1000})
-        self.assertIn("Land updated", self.game.command("land buy 1"))
+        bank_listing = next(
+            row for row in json.loads(self.game.command("auctions"))
+            if row["seller_name"] == "Earth Bank"
+        )
+        self.assertIn(
+            "escrow", self.game.command(
+                f"land buy {bank_listing['id']} 1 {bank_listing['reserve']}"
+            )
+        )
+        self.assertIn("Earth Bank wealth:", self.game.command("bank wealth"))
         result = self.game.command("auction list resource Fe 100 fiat 10")
         self.assertIn("Auction listed:", result)
-        self.assertEqual(json.loads(self.game.command("auctions"))[0]["asset"], "Fe")
+        resource_listing = next(
+            row for row in json.loads(self.game.command("auctions"))
+            if row["asset"] == "Fe"
+        )
         other = GameLogic(output=lambda message: None)
         other.create_player_account("another", "test long passphrase")
-        self.assertIn("seller", other.command("auction cancel 1"))
+        self.assertIn("seller", other.command(f"auction cancel {resource_listing['id']}"))
         self.assertEqual(sum(r["quantity"] for r in json.loads(other.command("inventory"))), 0)
-        self.assertIn("cancelled", self.game.command("auction cancel 1"))
-        self.assertIn("Insufficient", other.command("land buy 1"))
+        self.assertIn(
+            "cancelled",
+            self.game.command(f"auction cancel {resource_listing['id']}")
+        )
+        self.assertIn(
+            "Insufficient",
+            other.command(
+                f"land buy {bank_listing['id']} 1 {bank_listing['reserve'] + 1}"
+            )
+        )
 
     def test_local_one_shot_and_play_paths_use_authenticated_commands(self):
         with patch("main.getpass.getpass", return_value="test long passphrase"), \
