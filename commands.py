@@ -12,6 +12,7 @@ from economy import World, integer, ensure_player
 from simulation import tick
 
 HELP = """world | land | inventory/resources | workers | skills | jobs | equipment | power/hashrate
+work [status|start] (Earth Bank employment; 8-hour shifts)
 land buy AUCTION_ID ACRES PRICE_PER_ACRE | land sell PARCEL_ID
 assign WORKER_ID PARCEL_ID|none
 craft solar_panel|asic|droid
@@ -24,8 +25,9 @@ bank wealth (Earth Bank fiat, bitcoin and land reserve)
 Prices: integer microfiat or satoshis. Resources: integer micrograms.
 For Earth Bank land, bid amount is per acre and total escrow is amount times acres.
 Listed land/items must be idle/uninstalled. Bitcoin fees are reserved from the seller.
+Bank shifts gather resources for Earth Bank and pay fiat at shift completion.
 status/profile | help | quit
-New accounts receive nothing. Production bootstrap is unresolved; see README for opt-in local seeding."""
+New accounts receive no free assets; work start begins the production bootstrap."""
 
 
 def fixed(value, scale):
@@ -63,6 +65,27 @@ def execute(player, line):
         tick()
         world = World()
         market = AuctionHouse()
+        if command == "work":
+            if args == ["start"]:
+                shift = world.start_bank_shift(player)
+                rate = fixed(
+                    shift["wage_numerator"] * 1_000_000 // shift["wage_denominator"],
+                    1_000_000
+                )
+                return (f"Bank shift #{shift['id']} started for 8 hours at "
+                        f"{rate} microfiat per work-second.")
+            if args in ([], ["status"]):
+                shift = world.bank_work_status(player)
+                if shift is None:
+                    return "No active Earth Bank work shift."
+                rate = fixed(
+                    shift["wage_numerator"] * 1_000_000 // shift["wage_denominator"],
+                    1_000_000
+                )
+                return (f"Earth Bank shift #{shift['id']} is active until "
+                        f"{shift['completes_at']}; locked wage rate: "
+                        f"{rate} microfiat per work-second.")
+            raise ValueError("Use work [status|start]")
         if command == "land" and len(args) == 4 and args[0] == "buy":
             market.bid(player, integer(args[1], "auction ID"),
                        integer(args[3], "price per acre"), integer(args[2], "acres"))

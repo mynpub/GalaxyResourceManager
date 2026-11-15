@@ -35,64 +35,83 @@ def initialize(c):
 
 
 def ensure_earth_bank_listing(c, now):
-    """Keep at most one 1,000-acre Earth Bank fiat auction available."""
+    """Keep Bank land and eligible element stock available on the auction house."""
     from economy import (
         EARTH_BANK_AUCTION_DURATION, EARTH_BANK_LOT_ACRES, EARTH_BANK_PRICE_WINDOW,
         LAND_PRICE, MAX_INTEGER, earth_bank_id,
     )
 
     bank_id = earth_bank_id(c)
-    if c.execute(
+    active_land = c.execute(
         "SELECT 1 FROM auctions WHERE seller=? AND kind='land' "
         "AND status IN ('active','pending') LIMIT 1", (bank_id,)
+    ).fetchone()
+    if not active_land:
+        parcel = c.execute(
+            "SELECT id,acres FROM land WHERE player_id=? AND planet='Earth' AND locked=0 "
+            "ORDER BY id LIMIT 1",
+            (bank_id,)
+        ).fetchone()
+        if parcel is not None:
+            acres = min(EARTH_BANK_LOT_ACRES, parcel["acres"])
+            if acres == parcel["acres"]:
+                c.execute("UPDATE land SET locked=1 WHERE id=?", (parcel["id"],))
+                listing_parcel = parcel["id"]
+            else:
+                c.execute("UPDATE land SET acres=acres-? WHERE id=?", (acres, parcel["id"]))
+                listing_parcel = c.execute(
+                    "INSERT INTO land(player_id,acres,locked) VALUES (?,?,1)",
+                    (bank_id, acres)
+                ).lastrowid
+
+            listed_supply = c.execute(
+                "SELECT coalesce(sum(l.acres),0) FROM auctions a JOIN land l "
+                "ON l.id=CAST(a.asset AS INTEGER) WHERE a.seller=? AND a.kind='land' "
+                "AND a.planet='Earth' "
+                "AND a.status IN ('active','pending')", (bank_id,)
+            ).fetchone()[0] + acres
+            sales = c.execute(
+                "SELECT a.bid,l.acres FROM auctions a JOIN land l "
+                "ON l.id=CAST(a.asset AS INTEGER) WHERE a.kind='land' AND a.currency='fiat' "
+                "AND a.planet='Earth' AND a.status='sold' AND a.closes>=? ORDER BY a.id",
+                (now - EARTH_BANK_PRICE_WINDOW,)
+            ).fetchall()
+            recent_demand = sum(sale["acres"] for sale in sales)
+            if recent_demand:
+                average_price = sum(sale["bid"] for sale in sales) // recent_demand
+                adjusted_price = average_price * recent_demand // listed_supply
+            else:
+                adjusted_price = LAND_PRICE
+            reserve = max(1, adjusted_price * 9 // 10)
+            if reserve > MAX_INTEGER:
+                raise OverflowError("Earth Bank reserve exceeds supported integer range")
+            c.execute(
+                "INSERT INTO auctions(seller,kind,asset,quantity,currency,reserve,fee,closes,status) "
+                "VALUES(?, 'land', ?, 1, 'fiat', ?, 0, ?, 'active')",
+                (bank_id, str(listing_parcel), reserve, now + EARTH_BANK_AUCTION_DURATION)
+            )
+
+    if c.execute(
+        "SELECT 1 FROM bank_work_shifts WHERE status='running' LIMIT 1"
     ).fetchone():
         return
-
-    parcel = c.execute(
-        "SELECT id,acres FROM land WHERE player_id=? AND planet='Earth' AND locked=0 "
-        "ORDER BY id LIMIT 1",
+    stocks = c.execute(
+        "SELECT symbol,quantity FROM inventory WHERE player_id=? AND quantity>0 ORDER BY symbol",
         (bank_id,)
-    ).fetchone()
-    if parcel is None:
-        return
-
-    acres = min(EARTH_BANK_LOT_ACRES, parcel["acres"])
-    if acres == parcel["acres"]:
-        c.execute("UPDATE land SET locked=1 WHERE id=?", (parcel["id"],))
-        listing_parcel = parcel["id"]
-    else:
-        c.execute("UPDATE land SET acres=acres-? WHERE id=?", (acres, parcel["id"]))
-        listing_parcel = c.execute(
-            "INSERT INTO land(player_id,acres,locked) VALUES (?,?,1)",
-            (bank_id, acres)
-        ).lastrowid
-
-    listed_supply = c.execute(
-        "SELECT coalesce(sum(l.acres),0) FROM auctions a JOIN land l "
-        "ON l.id=CAST(a.asset AS INTEGER) WHERE a.seller=? AND a.kind='land' "
-        "AND a.planet='Earth' "
-        "AND a.status IN ('active','pending')", (bank_id,)
-    ).fetchone()[0] + acres
-    sales = c.execute(
-        "SELECT a.bid,l.acres FROM auctions a JOIN land l "
-        "ON l.id=CAST(a.asset AS INTEGER) WHERE a.kind='land' AND a.currency='fiat' "
-        "AND a.planet='Earth' AND a.status='sold' AND a.closes>=? ORDER BY a.id",
-        (now - EARTH_BANK_PRICE_WINDOW,)
     ).fetchall()
-    recent_demand = sum(sale["acres"] for sale in sales)
-    if recent_demand:
-        average_price = sum(sale["bid"] for sale in sales) // recent_demand
-        adjusted_price = average_price * recent_demand // listed_supply
-    else:
-        adjusted_price = LAND_PRICE
-    reserve = max(1, adjusted_price * 9 // 10)
-    if reserve > MAX_INTEGER:
-        raise OverflowError("Earth Bank reserve exceeds supported integer range")
-    c.execute(
-        "INSERT INTO auctions(seller,kind,asset,quantity,currency,reserve,fee,closes,status) "
-        "VALUES(?, 'land', ?, 1, 'fiat', ?, 0, ?, 'active')",
-        (bank_id, str(listing_parcel), reserve, now + EARTH_BANK_AUCTION_DURATION)
-    )
+    for stock in stocks:
+        if c.execute(
+            "SELECT 1 FROM auctions WHERE seller=? AND kind='resource' AND asset=? "
+            "AND status IN ('active','pending') LIMIT 1", (bank_id, stock["symbol"])
+        ).fetchone():
+            continue
+        c.execute("UPDATE inventory SET quantity=0 WHERE player_id=? AND symbol=?",
+                  (bank_id, stock["symbol"]))
+        c.execute(
+            "INSERT INTO auctions(seller,kind,asset,quantity,currency,reserve,fee,closes,status) "
+            "VALUES(?, 'resource', ?, ?, 'fiat', 1, 0, ?, 'active')",
+            (bank_id, stock["symbol"], stock["quantity"], now + EARTH_BANK_AUCTION_DURATION)
+        )
 
 
 def _release_asset(c, listing, recipient):

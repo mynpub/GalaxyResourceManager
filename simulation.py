@@ -42,8 +42,11 @@ def catch_up(c, now, max_events=MAX_EVENTS):
             return True
         candidates = [now, next_block]
         job = c.execute("SELECT min(completes_at) FROM jobs WHERE status='running'").fetchone()[0]
+        shift = c.execute(
+            "SELECT min(completes_at) FROM bank_work_shifts WHERE status='running'"
+        ).fetchone()[0]
         closing = c.execute("SELECT min(closes) FROM auctions WHERE status='active'").fetchone()[0]
-        for boundary in (job, closing):
+        for boundary in (job, shift, closing):
             if boundary is not None and boundary > current:
                 candidates.append(boundary)
         end = min(candidates)

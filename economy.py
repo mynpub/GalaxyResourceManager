@@ -23,6 +23,9 @@ EARTH_BANK_NPUB = "system:earth_bank"
 EARTH_BANK_LOT_ACRES = 1000
 EARTH_BANK_AUCTION_DURATION = 3600
 EARTH_BANK_PRICE_WINDOW = 30 * 86400
+BANK_INITIAL_FIAT = 1000 * 1_000_000
+BANK_WORK_WAGE = 1
+BANK_WORK_SHIFT = 8 * 3600
 
 
 def integer(value, name="quantity", minimum=1):
@@ -150,6 +153,55 @@ def migrate_v5(c):
                   (player_id, supply - allocated))
 
 
+def fiat_supply(c):
+    """Total spendable plus escrowed fiat in the world."""
+    balances = [row[0] for row in c.execute("SELECT fiat FROM accounts")]
+    escrow = [row[0] for row in c.execute(
+        "SELECT bid FROM auctions WHERE currency='fiat' AND status IN ('active','pending')"
+    )]
+    return integer(sum(balances) + sum(escrow), "fiat supply", 0)
+
+
+def migrate_v6(c):
+    """Add Bank employment and anchor wages to this world's fiat supply."""
+    bank_id = earth_bank_id(c)
+    if fiat_supply(c) == 0:
+        credit(c, bank_id, "fiat", BANK_INITIAL_FIAT)
+    initial_supply = fiat_supply(c)
+    if initial_supply <= 0:
+        raise ValueError("World fiat supply must be positive")
+    c.execute("""
+        CREATE TABLE world_economy (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            initial_fiat_supply INTEGER NOT NULL CHECK(initial_fiat_supply>0)
+        )
+    """)
+    c.execute("INSERT INTO world_economy VALUES (1,?)", (initial_supply,))
+    c.execute("""
+        CREATE TABLE bank_employment (
+            player_id INTEGER PRIMARY KEY REFERENCES players(id),
+            wage_remainder INTEGER NOT NULL DEFAULT 0 CHECK(wage_remainder>=0)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE bank_work_shifts (
+            id INTEGER PRIMARY KEY,
+            player_id INTEGER NOT NULL REFERENCES players(id),
+            started_at INTEGER NOT NULL,
+            completes_at INTEGER NOT NULL CHECK(completes_at>started_at),
+            wage_numerator INTEGER NOT NULL CHECK(wage_numerator>0),
+            wage_denominator INTEGER NOT NULL CHECK(wage_denominator>0),
+            status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','completed')),
+            wage_paid INTEGER NOT NULL DEFAULT 0 CHECK(wage_paid>=0)
+        )
+    """)
+    c.execute("""
+        CREATE UNIQUE INDEX bank_one_active_shift
+        ON bank_work_shifts(player_id) WHERE status='running'
+    """)
+    c.execute("CREATE INDEX bank_work_due ON bank_work_shifts(status,completes_at)")
+
+
 def earth_bank_id(c):
     row = c.execute("SELECT player_id FROM system_accounts WHERE name=?",
                     (EARTH_BANK_NAME,)).fetchone()
@@ -255,6 +307,17 @@ def _droid(c, pid):
                      (pid, item_id)).lastrowid
 
 
+def _deposit_gather(c, pid, mass, weights, total):
+    for symbol, weight in zip(catalog.SYMBOLS, weights):
+        carry = c.execute("SELECT carry FROM inventory WHERE player_id=? AND symbol=?",
+                          (pid, symbol)).fetchone()[0]
+        # Fractional micrograms stay in carry; partitioning ticks loses no mass.
+        quantity, remainder = divmod(mass * weight + carry, total)
+        change_resource(c, pid, symbol, quantity)
+        c.execute("UPDATE inventory SET carry=? WHERE player_id=? AND symbol=?",
+                  (remainder, pid, symbol))
+
+
 def _gather(c, start, end):
     if end == start:
         return
@@ -271,41 +334,89 @@ def _gather(c, start, end):
                            GROUP BY w.player_id""").fetchall():
         pid, count = row["player_id"], row["count"]
         mass = GATHER_RATE * (end - start) * count
-        for symbol, weight in zip(catalog.SYMBOLS, weights):
-            carry = c.execute("SELECT carry FROM inventory WHERE player_id=? AND symbol=?",
-                              (pid, symbol)).fetchone()[0]
-            # Fractional micrograms stay in carry; partitioning ticks loses no mass.
-            quantity, remainder = divmod(mass * weight + carry, total)
-            change_resource(c, pid, symbol, quantity)
-            c.execute("UPDATE inventory SET carry=? WHERE player_id=? AND symbol=?",
-                      (remainder, pid, symbol))
+        _deposit_gather(c, pid, mass, weights, total)
         _xp(c, pid, "mining", (end - start) * count)
 
 
+def _gather_bank_workers(c, start, end):
+    shifts = c.execute(
+        "SELECT player_id,started_at,completes_at FROM bank_work_shifts "
+        "WHERE status='running' AND started_at<? AND completes_at>?",
+        (end, start)
+    ).fetchall()
+    seconds = 0
+    for shift in shifts:
+        worked = max(0, min(end, shift["completes_at"]) - max(start, shift["started_at"]))
+        if worked:
+            seconds += worked
+            _xp(c, shift["player_id"], "mining", worked)
+    if not seconds:
+        return
+    bank_id = earth_bank_id(c)
+    mass = GATHER_RATE * seconds
+    weights = [integer(catalog.ABUNDANCE[s], "abundance", 0) for s in catalog.SYMBOLS]
+    total = sum(weights)
+    _deposit_gather(c, bank_id, mass, weights, total)
+
+
+def _complete_bank_shift(c, shift):
+    worked = shift["completes_at"] - shift["started_at"]
+    employment = c.execute(
+        "SELECT wage_remainder FROM bank_employment WHERE player_id=?",
+        (shift["player_id"],)
+    ).fetchone()
+    amount, remainder = divmod(
+        worked * shift["wage_numerator"] + employment["wage_remainder"],
+        shift["wage_denominator"]
+    )
+    credit(c, shift["player_id"], "fiat", amount)
+    c.execute("UPDATE bank_employment SET wage_remainder=? WHERE player_id=?",
+              (remainder, shift["player_id"]))
+    c.execute("UPDATE bank_work_shifts SET status='completed',wage_paid=? WHERE id=?",
+              (amount, shift["id"]))
+
+
 def advance(c, start, end):
-    """Gather and finish up to JOB_BATCH jobs; return False if more are due."""
+    """Gather and finish up to JOB_BATCH simulation events; return False if more are due."""
     start = integer(start, "start", 0)
     end = integer(end, "end", start)
     cursor = start
     jobs = c.execute("SELECT * FROM jobs WHERE status='running' AND completes_at<=? "
                      "ORDER BY completes_at,id LIMIT ?", (end, JOB_BATCH)).fetchall()
-    for job in jobs:
-        boundary = max(cursor, job["completes_at"])
+    shifts = c.execute(
+        "SELECT * FROM bank_work_shifts WHERE status='running' AND completes_at<=? "
+        "ORDER BY completes_at,id LIMIT ?", (end, JOB_BATCH)
+    ).fetchall()
+    events = sorted(
+        [(row["completes_at"], "job", row) for row in jobs]
+        + [(row["completes_at"], "shift", row) for row in shifts],
+        key=lambda event: (event[0], event[1], event[2]["id"])
+    )[:JOB_BATCH]
+    for completes_at, event_type, event in events:
+        boundary = max(cursor, completes_at)
         _gather(c, cursor, boundary)
+        _gather_bank_workers(c, cursor, boundary)
         cursor = boundary
-        recipe = json.loads(job["recipe_json"])
-        if recipe["output"] == "droid":
-            _droid(c, job["player_id"])
+        if event_type == "shift":
+            _complete_bank_shift(c, event)
         else:
-            stats = recipe["stats"]
-            c.execute("INSERT INTO equipment(player_id,kind,hashrate,power_watts) VALUES (?,?,?,?)",
-                      (job["player_id"], recipe["output"], stats["hashrate"], stats["power_watts"]))
-        _xp(c, job["player_id"], "crafting", recipe["xp"])
-        c.execute("UPDATE jobs SET status='completed' WHERE id=?", (job["id"],))
+            recipe = json.loads(event["recipe_json"])
+            if recipe["output"] == "droid":
+                _droid(c, event["player_id"])
+            else:
+                stats = recipe["stats"]
+                c.execute("INSERT INTO equipment(player_id,kind,hashrate,power_watts) VALUES (?,?,?,?)",
+                          (event["player_id"], recipe["output"], stats["hashrate"], stats["power_watts"]))
+            _xp(c, event["player_id"], "crafting", recipe["xp"])
+            c.execute("UPDATE jobs SET status='completed' WHERE id=?", (event["id"],))
     _gather(c, cursor, end)
-    return c.execute(
-        "SELECT 1 FROM jobs WHERE status='running' AND completes_at<=? LIMIT 1",
-        (end,)).fetchone() is None
+    _gather_bank_workers(c, cursor, end)
+    pending = c.execute(
+        "SELECT 1 FROM jobs WHERE status='running' AND completes_at<=? "
+        "UNION ALL SELECT 1 FROM bank_work_shifts WHERE status='running' AND completes_at<=? "
+        "LIMIT 1", (end, end)
+    ).fetchone()
+    return pending is None
 
 
 class World:
@@ -340,6 +451,44 @@ class World:
                 (bank_id,)
             ).fetchone()[0]
             return result
+
+    def start_bank_shift(self, pid):
+        with self._transaction(pid) as c:
+            if c.execute(
+                "SELECT 1 FROM bank_work_shifts WHERE player_id=? AND status='running'",
+                (pid,)
+            ).fetchone():
+                raise ValueError("A Bank work shift is already active")
+            initial = c.execute(
+                "SELECT initial_fiat_supply FROM world_economy WHERE id=1"
+            ).fetchone()[0]
+            supply = fiat_supply(c)
+            numerator = integer(BANK_WORK_WAGE * (initial + supply), "wage numerator")
+            denominator = integer(2 * initial, "wage denominator")
+            now = c.execute("SELECT last_tick FROM chain WHERE id=1").fetchone()[0]
+            completes_at = integer(now + BANK_WORK_SHIFT, "shift end")
+            c.execute("INSERT OR IGNORE INTO bank_employment(player_id) VALUES (?)", (pid,))
+            shift_id = c.execute(
+                "INSERT INTO bank_work_shifts(player_id,started_at,completes_at,"
+                "wage_numerator,wage_denominator) VALUES (?,?,?,?,?)",
+                (pid, now, completes_at, numerator, denominator)
+            ).lastrowid
+            return {
+                "id": shift_id,
+                "started_at": now,
+                "completes_at": completes_at,
+                "wage_numerator": numerator,
+                "wage_denominator": denominator,
+            }
+
+    def bank_work_status(self, pid):
+        with self._transaction(pid) as c:
+            shift = c.execute(
+                "SELECT id,started_at,completes_at,wage_numerator,wage_denominator "
+                "FROM bank_work_shifts WHERE player_id=? AND status='running'",
+                (pid,)
+            ).fetchone()
+            return dict(shift) if shift is not None else None
 
     def buy_land(self, pid, acres):
         raise ValueError("Earth land is sold through Earth Bank auctions; use auction bid")

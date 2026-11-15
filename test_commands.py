@@ -34,6 +34,7 @@ class GameplayCommandTests(unittest.TestCase):
         self.assertIn("0.0 fiat, 0.0 bitcoin", self.game.command("status"))
         self.assertEqual({s["level"] for s in json.loads(self.game.command("skills"))}, {1})
         self.assertIn("auction list", self.game.command("help"))
+        self.assertIn("work [status|start]", self.game.command("help"))
         self.assertIn("integer", self.game.command("land buy invalid 1 900000"))
         self.assertIn("Unexpected", self.game.command("inventory 999"))
         self.assertIn("No closing quotation", self.game.command('craft "'))
@@ -41,6 +42,15 @@ class GameplayCommandTests(unittest.TestCase):
         self.assertEqual(mass(1), "0.001 mg")
         self.assertEqual(mass(1_000_000), "1.0 g")
         self.assertEqual(mass(1_500_000_000), "1.5 kg")
+
+    def test_bank_work_commands_start_and_report_shift(self):
+        started = self.game.command("work start")
+        self.assertIn("started for 8 hours", started)
+        status = self.game.command("work status")
+        self.assertIn("Earth Bank shift #", status)
+        self.assertIn("1.0 microfiat per work-second", status)
+        self.assertIn("already active", self.game.command("work start"))
+        self.assertIn("Use work", self.game.command("work unknown"))
 
     def test_world_mutators_auction_and_private_inventory(self):
         World().seed(self.game.player_id, fiat=5_000_000, resources={"Fe": 1000})

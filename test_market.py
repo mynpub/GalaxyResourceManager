@@ -248,7 +248,8 @@ class MarketTests(unittest.TestCase):
             "SELECT acres FROM land WHERE player_id=3 ORDER BY id DESC LIMIT 1"
         )[0]["acres"]
         self.assertEqual(buyer_land, 600)
-        self.assertEqual(self.balance(bank_id, "fiat"), 660_000_000)
+        self.assertEqual(self.balance(bank_id, "fiat"),
+                         economy.BANK_INITIAL_FIAT + 660_000_000)
         next_listing = self.query(
             "SELECT reserve FROM auctions WHERE seller=? AND status='active'", (bank_id,)
         )[0]
