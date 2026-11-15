@@ -210,8 +210,7 @@ def earth_bank_id(c):
     return row["player_id"]
 
 
-def transfer_bank_land(c, pid, acres):
-    """Transfer unlocked Bank acreage under the caller's simulation transaction."""
+def _seed_land(c, pid, acres):
     bank_id = earth_bank_id(c)
     remaining = acres
     parcels = c.execute(
@@ -591,7 +590,7 @@ class World:
             credit(c, pid, "btc", btc)
             acres = integer(acres, "acres", 0)
             if acres:
-                transfer_bank_land(c, pid, acres)
+                _seed_land(c, pid, acres)
             for symbol, quantity in (resources or {}).items():
                 change_resource(c, pid, symbol, integer(quantity, minimum=0))
             for kind in ("human", "droid"):

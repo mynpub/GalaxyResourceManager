@@ -13,7 +13,7 @@ from economy import World, integer, ensure_player
 from simulation import tick
 
 HELP = """world | land | inventory/resources | workers | skills | jobs | equipment | power/hashrate
-tutorial [status|next|claim] | tutorial email ADDRESS | tutorial verify TOKEN
+tutorial [status|next|claim]
 work [status|start] (Earth Bank employment; 8-hour shifts)
 land buy AUCTION_ID ACRES PRICE_PER_ACRE | land sell PARCEL_ID
 assign WORKER_ID PARCEL_ID|none
@@ -29,7 +29,7 @@ For Earth Bank land, bid amount is per acre and total escrow is amount times acr
 Listed land/items must be idle/uninstalled. Bitcoin fees are reserved from the seller.
 Bank shifts gather resources for Earth Bank and pay fiat at shift completion.
 status/profile | help | quit
-Finish the tutorial and verify an email for one tradable acre, once per email.
+Finish the tutorial for a one-time fiat reward: current one-acre winning bid plus 10%.
 No workers or equipment are granted; work start earns your first wages."""
 
 
@@ -71,14 +71,7 @@ def execute(player, line):
                 return tutorial.next_lesson(player)
             if args == ["claim"]:
                 return tutorial.claim(player)
-            if len(args) == 2 and args[0] in ("email", "verify"):
-                import email_verification
-                if args[0] == "email":
-                    return email_verification.request(player, args[1])
-                return email_verification.verify(player, args[1])
-            raise ValueError(
-                "Use tutorial [status|next|claim], tutorial email ADDRESS or tutorial verify TOKEN"
-            )
+            raise ValueError("Use tutorial [status|next|claim]")
         # Reads also resume bounded offline catch-up; mutators enforce complete catch-up.
         tick()
         world = World()

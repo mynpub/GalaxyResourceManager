@@ -51,7 +51,7 @@ class MarketTests(unittest.TestCase):
         with database._connection() as c:
             bank_id = economy.earth_bank_id(c)
             c.execute("UPDATE land SET locked=0 WHERE player_id=?", (bank_id,))
-            land_id = economy.transfer_bank_land(c, player, acres)
+            land_id = economy._seed_land(c, player, acres)
             c.execute("UPDATE land SET locked=1 WHERE player_id=?", (bank_id,))
             return land_id
 

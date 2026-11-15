@@ -15,16 +15,16 @@ DATA_DIR = Path.home() / ".galaxy_resources"
 
 
 def _initialize(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 7:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 8:
         return
     _initialize_v6(connection)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
-        if connection.execute("PRAGMA user_version").fetchone()[0] >= 7:
+        if connection.execute("PRAGMA user_version").fetchone()[0] >= 8:
             return
         import tutorial
         tutorial.initialize(connection)
-        connection.execute("PRAGMA user_version = 7")
+        connection.execute("PRAGMA user_version = 8")
 
 
 def _initialize_v6(connection):
