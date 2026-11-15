@@ -8,10 +8,10 @@ and free access.
 Galaxy Resource Manager is a terminal-based multiplayer role-playing game prototype
 where players manage resources in space. Register a username and password to create
 an immediately usable account. No signup payment or activation step is required.
-The current implementation is an Earth-only playable vertical slice with
-gathering, crafting, power, simulated Bitcoin blocks and escrowed auctions.
-It is not a production-balanced game: signup grants nothing, and production
-workforce acquisition and the bootstrap economy remain unresolved.
+The current implementation is an Earth-only playable vertical slice with Bank
+employment, gathering, crafting, power, simulated Bitcoin blocks and escrowed
+auctions. It is not a production-balanced game: signup grants nothing, but paid
+work shifts provide a path into the economy.
 
 ## Features
 
@@ -23,6 +23,8 @@ workforce acquisition and the bootstrap economy remain unresolved.
 - Persistent player IDs and in-game fiat/bitcoin balances
 - Earth Bank NPC land auctions, all 118 elemental inventory records, workers and
   Mining/Crafting
+- Paid 8-hour Earth Bank work shifts; the Bank keeps and auctions the gathered
+  resources while wages are minted in fiat
 - Timed recipes, installed solar/ASIC equipment and exact-satoshi simulated mining
 - Earth auctions with asset, bid and seller-fee escrow
 - Database-serialized simulation, bounded offline catch-up and reward history
@@ -79,6 +81,7 @@ Hosted sessions use the same commands after login. `help` lists syntax:
 
 ```text
 world                         land
+work [status|start]
 land buy AUCTION_ID ACRES PRICE_PER_ACRE
 land sell PARCEL_ID           bank wealth
 inventory                     resources
@@ -106,9 +109,10 @@ Commands never accept an acting player ID; authorization comes from the session.
 
 Every signup starts at **zero fiat, zero BTC, zero of all 118 elements, no
 land, no equipment and no workers**. There is deliberately no hidden welcome
-grant or automatic human recruitment. Consequently an unseeded new world has
-a bootstrap deadlock. This PR does **not** resolve the production economic
-policy by inventing free assets.
+grant. Players can start an 8-hour `work` shift on Earth Bank land without
+owning land or workers; the Bank keeps and auctions the gathered elements and
+mints the worker's fiat wages when the shift ends. Optional seeding remains
+available for disposable local tests of player-owned assets.
 
 For a separate, disposable local world:
 
@@ -129,6 +133,9 @@ At the game prompt:
 
 ```text
 bank wealth
+auctions
+work start
+work status
 auctions
 auction bid AUCTION_ID 900000 1
 land
@@ -156,6 +163,11 @@ auction list resource Fe 1000 fiat 1000000 0 60
 auction bid AUCTION_ID 1000000
 ```
 
+An unseeded player can instead start `work start`; the shift runs for eight
+simulation hours even while offline. At completion, the player receives the
+fiat wage and Mining XP, while all gathered resources remain in Earth Bank
+inventory and are automatically listed by element in one-hour fiat auctions.
+
 Run a disposable TCP world with
 `python main.py --data-dir /tmp/grm-demo --serve-tcp --host 127.0.0.1 --port 7777`
 and connect using `nc 127.0.0.1 7777`. The plaintext warnings below still apply.
@@ -163,7 +175,8 @@ No live deployment, firewall or service changes are made by the implementation.
 
 ### Provisional balance, data and open decisions
 
-These are configurable **tuning defaults**, not user-approved balance decisions:
+These are current balance defaults; economy values may be tuned as playtesting
+and additional fiat mechanics provide more data:
 
 - Only Earth is active: **36,800,000,000 whole land acres**, initially held by
   the NPC **Earth Bank**. Sea is disabled. The Bank keeps one listing of up to
@@ -181,10 +194,22 @@ These are configurable **tuning defaults**, not user-approved balance decisions:
   the Bank having enough fiat.
   Planet-keyed land and auctions leave room for future worlds without activating
   any. Assigned or auction-locked land cannot be sold. One worker per owned acre.
+- New worlds start with **1,000 fiat** in the Earth Bank as the fiat-supply
+  baseline; new players still start with zero assets. A player may work one
+  fixed **8-hour** Bank shift at a time. The base wage is **1 microfiat per
+  work-second**; the shift locks a wage rate equal to the base multiplied by
+  `1 + 0.5 × (current fiat supply / starting fiat supply - 1)`. Supply includes
+  account balances and fiat escrow. The player receives newly issued fiat only
+  when the shift ends, and fractional microfiat carries across shifts. Each
+  employee gathers at **1 mg/second** and earns **1 Mining XP/second**; resources
+  go to Bank inventory, not the employee. When no Bank shifts are active, each
+  element's accumulated stock is listed in one active fiat auction with a
+  **1-microfiat reserve** and **one-hour duration**.
 - Humans and droids each gather **1 mg/second**, with equal efficiency, no
-  level-based speed bonus and no upkeep for this slice. Human recruitment/pricing is **unimplemented**;
-  only explicit operator test grants currently create humans. Workers must be
-  assigned to their owner's unlocked Earth land.
+  level-based speed bonus and no upkeep for this slice. Human recruitment/pricing
+  is unimplemented; only explicit operator test grants currently create owned
+  humans. Players working for the Bank are not owned workers. Owned workers must
+  be assigned to their owner's unlocked Earth land.
 - `catalog.py` contains all 118 elements, but catalog membership is **not**
   natural availability. The crust profile is a normalized, hand-rounded game
   approximation informed by the abundance figure in
@@ -245,9 +270,10 @@ Job, auction and block boundaries are processed chronologically.
 
 **Provisional offline policy:** assigned workers and installed/enabled equipment
 operate through all elapsed offline time. Jobs and auctions also complete
-offline. Catch-up is resumable in bounded batches of 256 event steps (and
-1,500 job completions/auction closures per step). A long backlog temporarily rejects mutations
-while committing catch-up progress; retry or leave the server running. Time is
+offline. Catch-up is resumable in bounded batches of 256 event steps (up to
+1,500 job/Bank-shift completions and 1,500 auction closures per step). A long backlog
+temporarily rejects mutations while committing catch-up progress; retry or
+leave the server running. Time is
 integer seconds; backward clock movement pauses simulation rather than undoing
 history. Asset columns are nonnegative signed 64-bit integers; overflow pauses
 the affected transaction rather than clipping or losing assets. Very large
@@ -417,7 +443,7 @@ GalaxyResourceManager/
 ## Storage and legacy migration
 
 Storage lives at `~/.galaxy_resources/galaxy_resources.db`. Back it up before
-upgrading. Schema version 5 upgrades earlier SQLite versions automatically.
+upgrading. Schema version 6 upgrades earlier SQLite versions automatically.
 The player table is rebuilt transactionally to allow new accounts without a
 legacy public key, while copying existing IDs, public keys, creation dates, and
 balances unchanged. Payment rows and any existing verification challenges remain
@@ -441,6 +467,12 @@ existing holdings. Normal signup initializes all records in one transaction.
 The v5 migration creates the non-login Earth Bank NPC and assigns it any
 previously unallocated Earth acreage; existing player-owned parcels remain
 unchanged. New worlds therefore begin with all Earth land in the Bank's reserve.
+
+The v6 migration adds Bank work shifts and the world fiat-supply baseline. A
+zero-fiat world receives the configured 1,000-fiat Bank reserve; an existing
+world with fiat already in accounts or escrow preserves that supply and uses it
+as its starting baseline. Employment history and fractional wage carries are
+stored transactionally.
 
 **Legacy Nostr accounts have no passwords or usernames.** Their credentials
 cannot be inferred. They remain preserved but cannot log in through the new
