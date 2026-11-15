@@ -85,8 +85,11 @@ class TCPServerTests(unittest.TestCase):
     def test_signup_login_and_two_client_isolation(self):
         first, first_stream = self.connect()
         second, second_stream = self.connect()
-        self.assertIn("Account created successfully",
-                      self.authenticate(first, first_stream, "signup", "alice"))
+        signup = self.authenticate(first, first_stream, "signup", "alice")
+        self.assertIn("Account created successfully", signup)
+        self.assertIn("Tutorial 1/6", signup)
+        self.send(first, "tutorial next")
+        self.assertIn("Complete these lesson commands", self.until_prompt(first_stream))
         self.send(second, "profile")
         self.assertIn("Please signup or login first", self.until_prompt(second_stream))
         self.authenticate(second, second_stream, "register", "bobby")

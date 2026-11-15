@@ -10,14 +10,15 @@ where players manage resources in space. Register a username and password to cre
 an immediately usable account. No signup payment or activation step is required.
 The current implementation is an Earth-only playable vertical slice with Bank
 employment, gathering, crafting, power, simulated Bitcoin blocks and escrowed
-auctions. It is not a production-balanced game: signup grants nothing, but paid
-work shifts provide a path into the economy.
+auctions. It is not a production-balanced game. A guided tutorial awards one
+tradable acre per verified email; paid work shifts provide fiat income.
 
 ## Features
 
 - Terminal-based interface
 - Multi-client hosted TCP terminal sessions
 - Username/password signup and login
+- Resumable mechanics tutorial with an email-verified, one-acre completion reward
 - Salted PBKDF2-HMAC-SHA256 password storage
 - Transaction-safe SQLite storage and legacy migration
 - Persistent player IDs and in-game fiat/bitcoin balances
@@ -95,6 +96,8 @@ auction list resource|item|land SYMBOL_OR_ID QUANTITY fiat|btc RESERVE [FEE_SATS
 auction bid AUCTION_ID AMOUNT [ACRES]
 auction cancel AUCTION_ID
 status                        quit
+tutorial [status|next|claim]
+tutorial email ADDRESS        tutorial verify TOKEN
 ```
 
 Quantities are **integer micrograms** (1 kg = 1,000,000,000 micrograms);
@@ -105,11 +108,72 @@ For Earth Bank listings, `AMOUNT` is the per-acre fiat bid and `ACRES` is the
 requested amount; the total (`AMOUNT × ACRES`) is escrowed when the bid is placed.
 Commands never accept an acting player ID; authorization comes from the session.
 
+### New-account tutorial and one-acre reward
+
+Signup automatically starts a six-lesson tutorial covering balances and Earth,
+Bank work, land/workers/gathering, crafting/skills, solar/ASIC power and simulated
+Bitcoin, and escrowed auctions. Use `--play` for an interactive local session;
+TCP sessions use the same commands. Run `tutorial` to see the current lesson,
+try each listed command, then run `tutorial next`. Progress is saved on the
+server and survives reconnects. Commands must succeed during the current lesson;
+repeating `tutorial next` cannot skip lessons. The lessons do not require paid
+assets, a completed 8-hour shift, or an actual market purchase.
+
+After finishing, run `tutorial email you@example.com`, enter the emailed token
+with `tutorial verify TOKEN`, then run `tutorial claim`. The reward transfers
+one **existing, unlocked Earth Bank acre**, not newly created land, and grants
+no workers, equipment, resources or currency. **The acre can be sold or auctioned**
+like any other parcel. If no unlocked Bank land remains, the claim fails without
+consuming eligibility and can be retried when land is available.
+
+Each account can verify only one tutorial email and claim only once. The database
+permanently reserves that email for the account, including after selling the acre.
+Addresses are case-insensitive; plus suffixes are ignored for eligibility on all
+domains, and Gmail/Googlemail dotted aliases share an identity. Only ASCII mailbox
+addresses are supported. These conservative rules may group some distinct
+mailboxes. A unique email is **not proof of a unique person**: disposable mailboxes,
+multiple independent addresses and other provider-specific aliases can still farm
+tradable rewards. This is a per-world database safeguard, not a guarantee against
+multi-accounting.
+
+Verification tokens are random, stored only as SHA-256 digests, account-bound,
+single-use, expire after 30 minutes and permit five verification attempts.
+Resending replaces the previous token. Requests are limited to one per 60 seconds
+and five per 24-hour window anchored at the first request, **both per
+account and per canonical recipient across accounts**. Delivery failures still
+consume send limits and invalidate the new token. An email and its canonical
+identity are stored privately in the world database, never in public game output.
+Existing accounts predating this update remain playable without retroactive
+tutorial reward eligibility.
+
+#### SMTP configuration
+
+The server process (or local game process) sends verification mail using the
+standard library. Configure these environment variables outside source control:
+
+| Variable | Meaning |
+| --- | --- |
+| `GRM_SMTP_HOST` | Required SMTP hostname |
+| `GRM_SMTP_FROM` | Required bare sender email address |
+| `GRM_SMTP_PORT` | Port, default `587` |
+| `GRM_SMTP_SECURITY` | `starttls` (default) or `ssl` (typically port `465`) |
+| `GRM_SMTP_USERNAME` | Optional authentication username |
+| `GRM_SMTP_PASSWORD` | Required if a username is supplied |
+
+TLS and certificate validation are mandatory; plaintext SMTP is not supported.
+Configure both authentication variables or neither. If mail is unconfigured or
+delivery fails, the command reports the error and rewards stay locked; there is
+no console-token fallback or unverified grant. Signup, lessons and regular
+gameplay do not depend on SMTP. Protect the database and SMTP credentials, and
+use a trusted encrypted tunnel for TCP sessions: the built-in plaintext TCP
+protocol otherwise exposes passwords and verification tokens in transit.
+
 ### Explicit test-world walkthrough (not production bootstrap)
 
 Every signup starts at **zero fiat, zero BTC, zero of all 118 elements, no
-land, no equipment and no workers**. There is deliberately no hidden welcome
-grant. Players can start an 8-hour `work` shift on Earth Bank land without
+land, no equipment and no workers**. The one-acre tutorial reward requires
+lesson completion and verified email; it is not an immediate signup grant.
+Players can start an 8-hour `work` shift on Earth Bank land without
 owning land or workers; the Bank keeps and auctions the gathered elements and
 mints the worker's fiat wages when the shift ends. Optional seeding remains
 available for disposable local tests of player-owned assets.
@@ -473,6 +537,10 @@ zero-fiat world receives the configured 1,000-fiat Bank reserve; an existing
 world with fiat already in accounts or escrow preserves that supply and uses it
 as its starting baseline. Employment history and fractional wage carries are
 stored transactionally.
+
+The v7 migration adds tutorial progress, private email verification records,
+delivery limits and permanent reward claims. Only newly created credentialed
+accounts are enrolled; existing players and assets are left unchanged.
 
 **Legacy Nostr accounts have no passwords or usernames.** Their credentials
 cannot be inferred. They remain preserved but cannot log in through the new
