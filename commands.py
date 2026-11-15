@@ -6,12 +6,14 @@ import sqlite3
 
 import database
 import catalog
+import tutorial
 from auctions import AuctionHouse
 from blockchain import status as chain_status
 from economy import World, integer, ensure_player
 from simulation import tick
 
 HELP = """world | land | inventory/resources | workers | skills | jobs | equipment | power/hashrate
+tutorial [status|next|claim]
 work [status|start] (Earth Bank employment; 8-hour shifts)
 land buy AUCTION_ID ACRES PRICE_PER_ACRE | land sell PARCEL_ID
 assign WORKER_ID PARCEL_ID|none
@@ -27,7 +29,8 @@ For Earth Bank land, bid amount is per acre and total escrow is amount times acr
 Listed land/items must be idle/uninstalled. Bitcoin fees are reserved from the seller.
 Bank shifts gather resources for Earth Bank and pay fiat at shift completion.
 status/profile | help | quit
-New accounts receive no free assets; work start begins the production bootstrap."""
+Finish the tutorial for a one-time fiat reward: current one-acre winning bid plus 10%.
+No workers or equipment are granted; work start earns your first wages."""
 
 
 def fixed(value, scale):
@@ -61,6 +64,14 @@ def execute(player, line):
         command, args = words[0].lower(), words[1:]
         if command == "help":
             return HELP
+        if command == "tutorial":
+            if args in ([], ["status"]):
+                return tutorial.show(player)
+            if args == ["next"]:
+                return tutorial.next_lesson(player)
+            if args == ["claim"]:
+                return tutorial.claim(player)
+            raise ValueError("Use tutorial [status|next|claim]")
         # Reads also resume bounded offline catch-up; mutators enforce complete catch-up.
         tick()
         world = World()
@@ -77,14 +88,19 @@ def execute(player, line):
             if args in ([], ["status"]):
                 shift = world.bank_work_status(player)
                 if shift is None:
-                    return "No active Earth Bank work shift."
-                rate = fixed(
-                    shift["wage_numerator"] * 1_000_000 // shift["wage_denominator"],
-                    1_000_000
-                )
-                return (f"Earth Bank shift #{shift['id']} is active until "
-                        f"{shift['completes_at']}; locked wage rate: "
-                        f"{rate} microfiat per work-second.")
+                    result = "No active Earth Bank work shift."
+                else:
+                    rate = fixed(
+                        shift["wage_numerator"] * 1_000_000 // shift["wage_denominator"],
+                        1_000_000
+                    )
+                    result = (f"Earth Bank shift #{shift['id']} is active until "
+                              f"{shift['completes_at']}; locked wage rate: "
+                              f"{rate} microfiat per work-second.")
+                with database._connection() as c:
+                    c.execute("BEGIN IMMEDIATE")
+                    tutorial.observe(c, player, "work status")
+                return result
             raise ValueError("Use work [status|start]")
         if command == "land" and len(args) == 4 and args[0] == "buy":
             market.bid(player, integer(args[1], "auction ID"),
@@ -136,14 +152,20 @@ def execute(player, line):
         if args and not (command == "bank" and args == ["wealth"]):
             raise ValueError("Unexpected arguments; use help")
         if command == "auctions":
-            return json.dumps(market.listings(player), indent=2)
+            result = json.dumps(market.listings(player), indent=2)
+            with database._connection() as c:
+                c.execute("BEGIN IMMEDIATE")
+                tutorial.observe(c, player, "auctions")
+            return result
         with database._connection() as c:
             ensure_player(c, player)
             if command in ("status", "profile"):
                 row = c.execute("SELECT fiat,btc FROM accounts WHERE player_id=?", (player,)).fetchone()
                 username = c.execute("SELECT username FROM players WHERE id=?", (player,)).fetchone()[0]
-                return (f"Username: {username}\nBalance: {fixed(row['fiat'], 1_000_000)} fiat, "
-                        f"{fixed(row['btc'], 100_000_000)} bitcoin (available; excludes escrow)")
+                result = (f"Username: {username}\nBalance: {fixed(row['fiat'], 1_000_000)} fiat, "
+                          f"{fixed(row['btc'], 100_000_000)} bitcoin (available; excludes escrow)")
+                tutorial.observe(c, player, command)
+                return result
             if command == "bank" and args in ([], ["wealth"]):
                 bank = c.execute(
                     "SELECT p.id,a.fiat,a.btc FROM system_accounts s "
@@ -154,9 +176,11 @@ def execute(player, line):
                     "SELECT coalesce(sum(acres),0) FROM land WHERE player_id=?",
                     (bank["id"],)
                 ).fetchone()[0]
-                return (f"Earth Bank wealth: {fixed(bank['fiat'], 1_000_000)} fiat, "
-                        f"{fixed(bank['btc'], 100_000_000)} bitcoin, "
-                        f"{land_acres} acres of land.")
+                result = (f"Earth Bank wealth: {fixed(bank['fiat'], 1_000_000)} fiat, "
+                          f"{fixed(bank['btc'], 100_000_000)} bitcoin, "
+                          f"{land_acres} acres of land.")
+                tutorial.observe(c, player, "bank wealth")
+                return result
             if command == "chain":
                 result = chain_status(c, player)
             elif command in ("inventory", "resources"):
@@ -190,6 +214,7 @@ def execute(player, line):
                 result["unused_watts"] = watts
             else:
                 return "Unknown command. Use help."
+            tutorial.observe(c, player, command)
         return json.dumps(result, indent=2)
     except ValueError as error:
         return str(error)

@@ -27,6 +27,8 @@ class GameLogic:
             self.player_id = player_id
             self.username = username
             self.output("Account created successfully!")
+            from tutorial import WELCOME, lesson_text
+            self.output(WELCOME + "\n" + lesson_text(0))
             return True
         except ValueError as error:
             self.output(str(error))

@@ -10,14 +10,16 @@ where players manage resources in space. Register a username and password to cre
 an immediately usable account. No signup payment or activation step is required.
 The current implementation is an Earth-only playable vertical slice with Bank
 employment, gathering, crafting, power, simulated Bitcoin blocks and escrowed
-auctions. It is not a production-balanced game: signup grants nothing, but paid
-work shifts provide a path into the economy.
+auctions. It is not a production-balanced game. A guided tutorial awards enough
+fiat for the current one-acre minimum winning bid plus 10%; paid work shifts
+provide additional fiat income.
 
 ## Features
 
 - Terminal-based interface
 - Multi-client hosted TCP terminal sessions
 - Username/password signup and login
+- Resumable mechanics tutorial with a market-priced, one-time fiat completion reward
 - Salted PBKDF2-HMAC-SHA256 password storage
 - Transaction-safe SQLite storage and legacy migration
 - Persistent player IDs and in-game fiat/bitcoin balances
@@ -95,6 +97,7 @@ auction list resource|item|land SYMBOL_OR_ID QUANTITY fiat|btc RESERVE [FEE_SATS
 auction bid AUCTION_ID AMOUNT [ACRES]
 auction cancel AUCTION_ID
 status                        quit
+tutorial [status|next|claim]
 ```
 
 Quantities are **integer micrograms** (1 kg = 1,000,000,000 micrograms);
@@ -105,11 +108,56 @@ For Earth Bank listings, `AMOUNT` is the per-acre fiat bid and `ACRES` is the
 requested amount; the total (`AMOUNT × ACRES`) is escrowed when the bid is placed.
 Commands never accept an acting player ID; authorization comes from the session.
 
+### New-account tutorial and market-priced fiat reward
+
+Signup automatically starts a six-lesson tutorial covering balances and Earth,
+Bank work, land/workers/gathering, crafting/skills, solar/ASIC power and simulated
+Bitcoin, and escrowed auctions. Use `--play` for an interactive local session;
+TCP sessions use the same commands. Run `tutorial` to see the current lesson,
+try each listed command, then run `tutorial next`. Progress is saved on the
+server and survives reconnects. Commands must succeed during the current lesson;
+repeating `tutorial next` cannot skip lessons. The lessons do not require paid
+assets, a completed 8-hour shift, or an actual market purchase.
+
+After finishing, run `tutorial claim`. No email, domain or SMTP setup is required.
+Under the simulation's write lock, the server catches the world up to the claim
+time and reads the active Earth Bank land auction. The one-acre minimum winning
+bid is the reserve if there is no bidder, or the greater of the reserve and the
+current highest **per-acre** bid plus one microfiat. The payout is that minimum
+plus **10%, rounded up to whole microfiat**, minted into your spendable balance
+regardless of your existing savings. With a fresh world's 900,000-microfiat
+reserve, this pays 990,000 microfiat (0.99 fiat).
+
+The claim prints a ready-to-use `land buy AUCTION_ID 1 PRICE_PER_ACRE` command.
+You must still place the bid and win the auction; no land, workers, equipment or
+resources are granted automatically. The price is sampled at claim time, not
+signup or lesson start. A later competing bid or auction price change can exceed
+the payout; the buffer is not a guaranteed auction win or an ongoing top-up.
+If there is no active Bank land auction, the claim reports an error without
+paying or consuming eligibility, so it can be retried when land is listed.
+Overflow or balance errors also roll back both payout and claim history.
+
+Payouts are recorded once per account in the world database, including the
+auction, minimum bid, payout amount and timestamp. Concurrent/repeated claims,
+reconnects, spending the money or selling land do not reset eligibility.
+Existing accounts predating the tutorial update remain playable without
+retroactive enrollment. If upgrading a database from the shelved email tutorial
+branch, progress is preserved and accounts that already received an acre cannot
+also claim fiat.
+
+**Abuse limitation:** without email or another identity check, a player can create
+multiple accounts and collect multiple rewards. Checking lesson commands is not
+a bot defense. An auction participant can also raise the current bid to increase
+future tutorial payouts. This intentionally uncapped, market-linked grant mints
+fiat and increases the supply used for Bank wage calculations; it is not
+production anti-farming protection.
+
 ### Explicit test-world walkthrough (not production bootstrap)
 
 Every signup starts at **zero fiat, zero BTC, zero of all 118 elements, no
-land, no equipment and no workers**. There is deliberately no hidden welcome
-grant. Players can start an 8-hour `work` shift on Earth Bank land without
+land, no equipment and no workers**. The fiat tutorial reward requires
+lesson completion and an explicit claim; it is not an immediate signup grant.
+Players can start an 8-hour `work` shift on Earth Bank land without
 owning land or workers; the Bank keeps and auctions the gathered elements and
 mints the worker's fiat wages when the shift ends. Optional seeding remains
 available for disposable local tests of player-owned assets.
@@ -473,6 +521,11 @@ zero-fiat world receives the configured 1,000-fiat Bank reserve; an existing
 world with fiat already in accounts or escrow preserves that supply and uses it
 as its starting baseline. Employment history and fractional wage carries are
 stored transactionally.
+
+The v8 migration adds tutorial progress and permanent fiat reward claims. Only
+newly created credentialed accounts are enrolled; existing players and assets
+are left unchanged. It can also upgrade the shelved v7 email-tutorial schema,
+preserving progress and preventing a second reward after an earlier land grant.
 
 **Legacy Nostr accounts have no passwords or usernames.** Their credentials
 cannot be inferred. They remain preserved but cannot log in through the new
