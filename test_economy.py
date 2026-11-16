@@ -256,8 +256,44 @@ class EconomyTests(unittest.TestCase):
             self.now += 120
             self.assertEqual(self.world.snapshot(self.pid)["equipment"][0]["kind"], "asic")
 
+    def test_one_worker_gathers_asic_and_solar_panel_inputs_in_sixty_seconds(self):
+        self.world.seed(self.pid, humans=1, acres=1)
+        snapshot = self.world.snapshot(self.pid)
+        self.world.assign(self.pid, snapshot["workers"][0]["id"], snapshot["land"][0]["id"])
+        for recipe_id in ("asic", "solar_panel"):
+            with database._connection() as c:
+                c.execute("UPDATE inventory SET quantity=0,carry=0 WHERE player_id=?", (self.pid,))
+            if recipe_id == "asic":
+                # ASIC gold is the bottleneck that sets the gathering rate.
+                self.now += 59
+                with self.assertRaises(ValueError):
+                    self.world.craft(self.pid, recipe_id)
+                self.now += 1
+            else:
+                self.now += 60
+            self.world.craft(self.pid, recipe_id)
+
+    def test_resource_credits_stop_at_storage_cap_without_pausing_simulation(self):
+        self.world.seed(self.pid, humans=1, acres=1)
+        snapshot = self.world.snapshot(self.pid)
+        self.world.assign(self.pid, snapshot["workers"][0]["id"], snapshot["land"][0]["id"])
+        with database._connection() as c:
+            c.execute("UPDATE inventory SET quantity=? WHERE player_id=? AND symbol='O'",
+                      (economy.MAX_INTEGER - 1, self.pid))
+            economy.change_resource(c, self.pid, "O", economy.MAX_INTEGER)
+            self.assertEqual(c.execute(
+                "SELECT quantity FROM inventory WHERE player_id=? AND symbol='O'", (self.pid,)
+            ).fetchone()[0], economy.MAX_INTEGER)
+        # A week of offline gathering would exceed the cap for oxygen.
+        self.now += 7 * 86400
+        import simulation
+        while not simulation.tick(lambda: self.now):
+            pass
+        inventory = self.world.snapshot(self.pid)["inventory"]
+        self.assertEqual(inventory["O"], economy.MAX_INTEGER)
+        self.assertGreater(inventory["Au"], 0)
+
     def test_accepted_recipe_inputs_and_reachable_natural_resources(self):
-        self.assertEqual(economy.GATHER_RATE, 1000)
         expected = {
             "solar_panel": {"Si": 8000000000, "Al": 6000000000, "Cu": 2000000000, "Ag": 20000000},
             "asic": {"Si": 1500000000, "Cu": 3000000000, "Al": 2000000000,

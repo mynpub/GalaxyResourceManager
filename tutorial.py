@@ -26,7 +26,8 @@ LESSONS = (
         "Land, workers and gathering",
         "Inspect land, workers and inventory. Owned workers gather only when "
         "assigned to your land: assign WORKER_ID PARCEL_ID. Each acre holds one "
-        "worker; humans and droids gather 1 mg/second of crust-weighted elements. "
+        "worker; humans and droids gather about 33 tonnes/second of crust-weighted "
+        "elements, enough for a basic ASIC or solar panel in 60 seconds. "
         "Resources are stored in micrograms. The tutorial rewards fiat to bid on "
         "land, not a worker; Bank shifts do not fill your personal inventory.",
         ("land", "workers", "inventory"),

@@ -13,7 +13,9 @@ import database
 
 LAND_SUPPLY = 36800000000
 LAND_PRICE = 1000000
-GATHER_RATE = 1000  # Provisional 1 mg per second, human and droid alike.
+# Micrograms per second (~33.4 t/s), human and droid alike: one worker gathers every
+# basic ASIC and solar panel input in 60 seconds (ASIC gold is the bottleneck).
+GATHER_RATE = 33_437_202_633_334
 RECIPES = json.loads(Path(__file__).with_name("recipes.json").read_text())["recipes"]
 MAX_INTEGER = 2 ** 63 - 1
 MAX_SEED_COUNT = 10000
@@ -266,14 +268,25 @@ def credit(c, pid, currency, amount):
 
 
 def change_resource(c, pid, symbol, delta):
+    """Debit exactly; credits stop at the storage cap and discard any excess."""
     if symbol not in catalog.SYMBOLS:
         raise ValueError("Unknown element")
     if isinstance(delta, bool) or not isinstance(delta, int) or abs(delta) > MAX_INTEGER:
         raise ValueError("Resource delta must be a bounded integer")
-    if c.execute("""UPDATE inventory SET quantity=quantity+?
-                    WHERE player_id=? AND symbol=? AND quantity+? BETWEEN 0 AND ?""",
-                 (delta, pid, symbol, delta, MAX_INTEGER)).rowcount != 1:
-        raise ValueError("Insufficient resource, overflow, or unknown player")
+    if delta >= 0:
+        changed = c.execute(
+            "UPDATE inventory SET quantity=CASE WHEN quantity>? THEN ? ELSE quantity+? END "
+            "WHERE player_id=? AND symbol=?",
+            (MAX_INTEGER - delta, MAX_INTEGER, delta, pid, symbol)
+        ).rowcount
+    else:
+        changed = c.execute(
+            "UPDATE inventory SET quantity=quantity+? "
+            "WHERE player_id=? AND symbol=? AND quantity>=?",
+            (delta, pid, symbol, -delta)
+        ).rowcount
+    if changed != 1:
+        raise ValueError("Insufficient resource or unknown player")
 
 
 def effective_hash(c):
@@ -322,7 +335,7 @@ def _deposit_gather(c, pid, mass, weights, total):
                           (pid, symbol)).fetchone()[0]
         # Fractional micrograms stay in carry; partitioning ticks loses no mass.
         quantity, remainder = divmod(mass * weight + carry, total)
-        change_resource(c, pid, symbol, quantity)
+        change_resource(c, pid, symbol, min(quantity, MAX_INTEGER))
         c.execute("UPDATE inventory SET carry=? WHERE player_id=? AND symbol=?",
                   (remainder, pid, symbol))
 

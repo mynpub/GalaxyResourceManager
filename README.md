@@ -284,11 +284,15 @@ and additional fiat mechanics provide more data:
   `1 + 0.5 × (current fiat supply / starting fiat supply - 1)`. Supply includes
   account balances and fiat escrow. The player receives newly issued fiat only
   when the shift ends, and fractional microfiat carries across shifts. Each
-  employee gathers at **1 mg/second** and earns **1 Mining XP/second**; resources
+  employee gathers at the worker rate below and earns **1 Mining XP/second**; resources
   go to Bank inventory, not the employee. When no Bank shifts are active, each
   element's accumulated stock is listed in one active fiat auction with a
   **1-microfiat reserve** and **one-hour duration**.
-- Humans and droids each gather **1 mg/second**, with equal efficiency, no
+- Humans and droids each gather **33,437,202,633,334 micrograms/second (~33.4
+  tonnes/second)** of crust-weighted elements. This is the lowest rate at which one
+  worker gathers every input for a basic ASIC in 60 seconds (gold is the
+  bottleneck); solar panel inputs take about 8 seconds and droid inputs about
+  2 seconds. Workers have equal efficiency, no
   level-based speed bonus and no upkeep for this slice. Human recruitment/pricing
   is unimplemented; only explicit operator test grants currently create owned
   humans. Players working for the Bank are not owned workers. Owned workers must
@@ -315,9 +319,8 @@ and additional fiat mechanics provide more data:
   Inputs are consumed atomically at job creation; no cancellation/refund is
   provided. The stored recipe snapshot protects jobs from subsequent edits.
   Provisional duration/XP pairs: solar panel **60 seconds / 60 XP**, ASIC
-  **120 seconds / 120 XP**, droid **180 seconds / 180 XP**. Crust-average precious
-  metal yields are extremely slow for a lone worker; throughput and production
-  balance have not been playtested.
+  **120 seconds / 120 XP**, droid **180 seconds / 180 XP**. Throughput and
+  production balance have not been playtested.
 - Solar panels supply **100 W continuously** (no night/weather/storage model).
   A basic ASIC consumes **100 W**, with provisional **1 TH/s**. Oldest enabled,
   installed ASICs receive the owner's power first. No double-use: locked or
@@ -363,7 +366,11 @@ offline. Catch-up is resumable in bounded batches of 256 event steps (up to
 temporarily rejects mutations while committing catch-up progress; retry or
 leave the server running. Time is
 integer seconds; backward clock movement pauses simulation rather than undoing
-history. Asset columns are nonnegative signed 64-bit integers; overflow pauses
+history. Asset columns are nonnegative signed 64-bit integers. Each element's
+inventory is capped at 9,223,372,036,854,775,807 micrograms (~9.2 million tonnes);
+gathering, auction deliveries and refunds beyond the cap are **discarded** so a
+full inventory never pauses the simulation. At the current rate, one worker
+fills oxygen in about a week. Other asset overflow pauses
 the affected transaction rather than clipping or losing assets. Very large
 worlds need wider-quantity storage and capacity planning. Use a stable system
 clock and back up storage. No distributed
