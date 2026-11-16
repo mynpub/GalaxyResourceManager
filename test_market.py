@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import auctions
 import blockchain
+import catalog
 import database
 import economy
 import simulation
@@ -420,6 +421,35 @@ class MarketTests(unittest.TestCase):
         expected = average * 1001 // 1000
         self.assertEqual(active(), {**active(), "reserve": expected * 9 // 10,
                                     "buy_now": (expected * 110 + 99) // 100})
+
+    def test_earth_bank_resource_reserve_follows_recent_sales_then_labor_value(self):
+        listing = self.market.list_asset(1, "resource", "Fe", 100_000, "fiat", 1000, duration=60)
+        self.market.bid(2, listing, 1000)
+        self.now += 60
+        simulation.tick(self.clock)
+
+        def bank_fe_reserve():
+            while not simulation.tick(self.clock):
+                pass
+            with database._connection() as c:
+                bank_id = economy.earth_bank_id(c)
+                c.execute("UPDATE auctions SET status='cancelled' WHERE seller=? "
+                          "AND kind='resource' AND status='active'", (bank_id,))
+                c.execute("UPDATE inventory SET quantity=50000 WHERE player_id=? "
+                          "AND symbol='Fe'", (bank_id,))
+            simulation.tick(self.clock)
+            return self.query(
+                "SELECT reserve FROM auctions WHERE kind='resource' AND asset='Fe' "
+                "AND status='active'"
+            )[0]["reserve"]
+
+        # 10% below 1,000 microfiat per 100,000 micrograms, for 50,000 micrograms.
+        self.assertEqual(bank_fe_reserve(), 450)
+        self.now += economy.EARTH_BANK_PRICE_WINDOW + 1
+        total = sum(catalog.ABUNDANCE.values())
+        elements = sum(1 for weight in catalog.ABUNDANCE.values() if weight)
+        self.assertEqual(bank_fe_reserve(), max(1, -(-50_000 * total // (
+            elements * economy.GATHER_RATE * catalog.ABUNDANCE["Fe"]))))
 
     def test_time_weighting_prevents_last_second_snapshot_and_survives_restart(self):
         self.miner(1)

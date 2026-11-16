@@ -287,7 +287,12 @@ and additional fiat mechanics provide more data:
   employee gathers at the worker rate below and earns **1 Mining XP/second**; resources
   go to Bank inventory, not the employee. When no Bank shifts are active, each
   element's accumulated stock is listed in one active fiat auction with a
-  **1-microfiat reserve** and **one-hour duration**.
+  **one-hour duration**. Its reserve is 10% below that element's average price
+  per microgram from completed fiat sales (Bank and player) in the last 30 days.
+  Without recent sales, the reserve is the element's **labor value**: each
+  gatherable element is worth an equal share of the base wage (1 microfiat per
+  work-second), so one shift's stockpiles together cost about its base wages and
+  rarer elements cost more per gram. Reserves round up to at least 1 microfiat.
 - Humans and droids each gather **33,437,202,633,334 micrograms/second (~33.4
   tonnes/second)** of crust-weighted elements. This is the lowest rate at which one
   worker gathers every input for a basic ASIC in 60 seconds (gold is the

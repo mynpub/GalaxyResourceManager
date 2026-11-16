@@ -89,17 +89,24 @@ class EconomyTests(unittest.TestCase):
                 "AND status='active'", (bank_id,)
             ).fetchone()[0]
             listings = c.execute(
-                "SELECT asset,currency,reserve,closes FROM auctions WHERE seller=? "
+                "SELECT asset,quantity,currency,reserve,closes FROM auctions WHERE seller=? "
                 "AND kind='resource' AND status='active'", (bank_id,)
             ).fetchall()
             self.assertTrue(listings)
             self.assertEqual(len({row["asset"] for row in listings}), len(listings))
+            weight_total = sum(catalog.ABUNDANCE.values())
+            elements = sum(1 for weight in catalog.ABUNDANCE.values() if weight)
             self.assertTrue(all(
-                row["currency"] == "fiat" and row["reserve"] == 1
+                row["currency"] == "fiat"
                 and row["closes"] == self.now + economy.EARTH_BANK_AUCTION_DURATION
+                and row["reserve"] == max(1, -(-row["quantity"] * weight_total // (
+                    elements * economy.GATHER_RATE * catalog.ABUNDANCE[row["asset"]])))
                 for row in listings
             ))
-            weight_total = sum(catalog.ABUNDANCE.values())
+            # Labor value: selling every listed stockpile at reserve never exceeds the wages
+            # (trace elements below 1 microgram stay unlisted), apart from per-lot rounding up.
+            self.assertLessEqual(sum(row["reserve"] for row in listings),
+                                 economy.BANK_WORK_SHIFT + len(listings))
             self.assertEqual(bank["sum(quantity)"] * weight_total + bank["sum(carry)"]
                              + listed * weight_total,
                              economy.GATHER_RATE * economy.BANK_WORK_SHIFT * weight_total)
