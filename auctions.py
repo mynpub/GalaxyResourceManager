@@ -92,6 +92,30 @@ def _earth_land_market_price(c, now, listed_supply):
                    "Earth market price", 1)
 
 
+def _earth_resource_reserve(c, now, symbol, quantity):
+    """Price Bank stock 10% below recent sales, or at labor value without history."""
+    import catalog
+    from economy import BANK_WORK_WAGE, EARTH_BANK_PRICE_WINDOW, GATHER_RATE, MAX_INTEGER
+
+    sales = c.execute(
+        "SELECT bid,quantity FROM auctions WHERE kind='resource' AND asset=? "
+        "AND currency='fiat' AND planet='Earth' AND status='sold' AND closes>=?",
+        (symbol, now - EARTH_BANK_PRICE_WINDOW)
+    ).fetchall()
+    # Python integers avoid SQLite sum() overflow on huge resource quantities.
+    sold = sum(sale["quantity"] for sale in sales)
+    if sold:
+        reserve = quantity * sum(sale["bid"] for sale in sales) * 9 // (10 * sold)
+    else:
+        # Each gatherable element earns an equal share of one work-second's base wage.
+        weights = catalog.ABUNDANCE
+        total = sum(weights.values())
+        elements = sum(1 for weight in weights.values() if weight)
+        denominator = elements * GATHER_RATE * weights[symbol]
+        reserve = -(-quantity * BANK_WORK_WAGE * total // denominator)
+    return min(MAX_INTEGER, max(1, reserve))
+
+
 def ensure_earth_bank_listing(c, now):
     """Keep Bank land and eligible element stock available on the auction house."""
     from economy import (
@@ -159,8 +183,10 @@ def ensure_earth_bank_listing(c, now):
                   (bank_id, stock["symbol"]))
         c.execute(
             "INSERT INTO auctions(seller,kind,asset,quantity,currency,reserve,fee,closes,status) "
-            "VALUES(?, 'resource', ?, ?, 'fiat', 1, 0, ?, 'active')",
-            (bank_id, stock["symbol"], stock["quantity"], now + EARTH_BANK_AUCTION_DURATION)
+            "VALUES(?, 'resource', ?, ?, 'fiat', ?, 0, ?, 'active')",
+            (bank_id, stock["symbol"], stock["quantity"],
+             _earth_resource_reserve(c, now, stock["symbol"], stock["quantity"]),
+             now + EARTH_BANK_AUCTION_DURATION)
         )
 
 
