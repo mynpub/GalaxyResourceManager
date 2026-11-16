@@ -392,7 +392,34 @@ class MarketTests(unittest.TestCase):
         next_listing = self.query(
             "SELECT reserve,buy_now FROM auctions WHERE seller=? AND status='active'", (bank_id,)
         )[0]
-        self.assertEqual(next_listing, {"reserve": 593_999, "buy_now": 725_999})
+        # 600 of 1,000 acres sold: weak demand keeps the 1_099_999 average price.
+        self.assertEqual(next_listing, {"reserve": 989_999, "buy_now": 1_209_999})
+
+    def test_earth_bank_price_rises_with_demand_and_small_sales_do_not_collapse_it(self):
+        with database._connection() as c:
+            bank_id = economy.earth_bank_id(c)
+            c.execute("UPDATE land SET locked=0 WHERE player_id=?", (bank_id,))
+            c.execute("UPDATE accounts SET fiat=5000000000 WHERE player_id IN (2,3)")
+        simulation.tick(self.clock)
+
+        def active():
+            return self.query(
+                "SELECT id,reserve,buy_now FROM auctions WHERE seller=? AND kind='land' "
+                "AND status='active'", (bank_id,)
+            )[0]
+
+        self.market.bid(2, active()["id"], 900_000, 1)
+        self.now += auctions.DEFAULT_DURATION
+        simulation.tick(self.clock)
+        self.assertEqual(active(), {**active(), "reserve": 810_000, "buy_now": 990_000})
+
+        # 1,001 acres sold in the window against a 1,000-acre listing raises the price.
+        self.market.buy_now(3, active()["id"], 1000)
+        simulation.tick(self.clock)
+        average = (900_000 + 990_000 * 1000) // 1001
+        expected = average * 1001 // 1000
+        self.assertEqual(active(), {**active(), "reserve": expected * 9 // 10,
+                                    "buy_now": (expected * 110 + 99) // 100})
 
     def test_time_weighting_prevents_last_second_snapshot_and_survives_restart(self):
         self.miner(1)

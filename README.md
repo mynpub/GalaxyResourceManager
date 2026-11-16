@@ -262,16 +262,16 @@ and additional fiat mechanics provide more data:
   one-hour close, and the total bid (`price × acres`) is escrowed immediately.
   Each Bank land listing also offers an immediate buy-now price per acre, rounded
   up to 10% above the current adjusted market price. The adjusted market price is
-  the recent acreage-weighted sale price multiplied by recent acres sold divided
-  by currently listed Bank acreage. Before the first completed land sale, it
+  the recent acreage-weighted sale price, multiplied by recent acres sold divided
+  by currently listed Bank acreage only when that ratio exceeds 1. Weak demand
+  never lowers it below the recent average; prices fall gradually as sales close
+  near the 10%-below reserve. Before the first completed land sale, it
   falls back to 1 fiat/acre. Use `auction buy AUCTION_ID ACRES` to purchase
   selected acres at this fixed price; ordinary bids must remain below it.
   The winner receives only the selected acreage; the remainder returns to the
-  Bank's reserve. Bank land is fiat-only. Its reserve is 10% below an adjusted
-  reference price: the acreage-weighted average price per acre from completed
-  fiat land auctions in the last 30 days, multiplied by recent acres sold
-  divided by the Bank's currently listed acreage. Before the first completed
-  sale, the reference falls back to the existing 1 fiat/acre baseline.
+  Bank's reserve. Bank land is fiat-only. Its reserve is 10% below this adjusted
+  market price (rounded down). Recent sales are completed fiat land auctions
+  in the last 30 days.
   `bank wealth` shows the Bank's fiat, bitcoin, and land reserve. A direct
   `land sell` returns unassigned land to the Bank at 1 fiat/acre, subject to
   the Bank having enough fiat.

@@ -87,7 +87,9 @@ def _earth_land_market_price(c, now, listed_supply):
     if not recent_demand:
         return LAND_PRICE
     average_price = sum(sale["bid"] for sale in sales) // recent_demand
-    return integer(average_price * recent_demand // listed_supply, "Earth market price", 1)
+    # Strong demand raises the price; weak demand never cuts it below the recent average.
+    return integer(average_price * max(recent_demand, listed_supply) // listed_supply,
+                   "Earth market price", 1)
 
 
 def ensure_earth_bank_listing(c, now):
