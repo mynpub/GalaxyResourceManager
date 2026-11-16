@@ -21,11 +21,12 @@ craft solar_panel|asic|droid
 equip ITEM_ID install|uninstall|on|off
 chain (block schedule, hashrates, queue and your reward ledger)
 auctions (Earth market and your last 100 settlement records)
-auction list resource|item|land SYMBOL_OR_ID QUANTITY fiat|btc RESERVE [FEE_SATS] [SECONDS]
-auction bid AUCTION_ID AMOUNT [ACRES] | auction cancel AUCTION_ID
+auction list resource|item|land SYMBOL_OR_ID QUANTITY fiat|btc RESERVE [FEE_SATS] [SECONDS] [--buy-now PRICE]
+auction bid AUCTION_ID AMOUNT [ACRES] | auction buy AUCTION_ID [ACRES] | auction cancel AUCTION_ID
 bank wealth (Earth Bank fiat, bitcoin and land reserve)
 Prices: integer microfiat or satoshis. Resources: integer micrograms.
 For Earth Bank land, bid amount is per acre and total escrow is amount times acres.
+Buy now is optional and denominated in listing currency (per acre for Earth Bank land).
 Listed land/items must be idle/uninstalled. Bitcoin fees are reserved from the seller.
 Bank shifts gather resources for Earth Bank and pay fiat at shift completion.
 status/profile | help | quit
@@ -133,18 +134,33 @@ def execute(player, line):
                 raise ValueError("Choose install, uninstall, on or off")
             return "Equipment updated."
         if command == "auction" and args:
-            if args[0] == "list" and 6 <= len(args) <= 8:
-                fee = integer(args[6], "fee", minimum=0) if len(args) > 6 else 0
-                kwargs = {"duration": integer(args[7], "duration")} if len(args) > 7 else {}
+            if args[0] == "list" and len(args) >= 6:
+                options = args[6:]
+                fee = integer(options.pop(0), "fee", minimum=0) if options and options[0] != "--buy-now" else 0
+                duration = integer(options.pop(0), "duration") if options and options[0] != "--buy-now" else None
+                buy_now = None
+                if options:
+                    if len(options) != 2 or options[0] != "--buy-now":
+                        raise ValueError("Use --buy-now PRICE after optional fee and duration")
+                    buy_now = integer(options[1], "buy now price")
                 result = market.list_asset(
                     player, args[1], args[2], integer(args[3]), args[4],
-                    integer(args[5], "reserve"), fee, **kwargs)
+                    integer(args[5], "reserve"), fee,
+                    **({"duration": duration} if duration is not None else {}),
+                    buy_now=buy_now)
                 return f"Auction listed: {result}"
             if args[0] == "bid" and len(args) in (3, 4):
                 acreage = integer(args[3], "acres") if len(args) == 4 else None
                 market.bid(player, integer(args[1], "auction ID"),
                            integer(args[2], "bid"), acreage)
                 return "Bid escrow reserved."
+            if args[0] == "buy" and len(args) in (2, 3):
+                acreage = integer(args[2], "acres") if len(args) == 3 else None
+                pending = market.buy_now(player, integer(args[1], "auction ID"), acreage)
+                if pending == "pending":
+                    return "Buy now reserved; BTC purchases settle in a block."
+                return ("Buy now complete; use land to inspect your purchase."
+                        if acreage is not None else "Buy now complete.")
             if args[0] == "cancel" and len(args) == 2:
                 market.cancel(player, integer(args[1], "auction ID"))
                 return "Auction cancelled; escrow released."

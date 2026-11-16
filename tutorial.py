@@ -54,7 +54,9 @@ LESSONS = (
         "one hour: land buy AUCTION_ID ACRES PRICE_PER_ACRE reserves the total "
         "bid immediately. The highest per-acre bid wins. Player auctions trade "
         "idle land, elements and uninstalled equipment; Bitcoin settlement waits "
-        "for block inclusion. After this lesson, use tutorial claim for enough "
+        "for block inclusion. Optional buy-now prices let you purchase early with "
+        "`auction buy`; the Bank's fixed land price is 10% above market. After "
+        "this lesson, use tutorial claim for enough "
         "fiat to cover the current minimum winning bid for one acre plus 10%. "
         "Then place a land buy bid; land is not granted automatically. "
         "Later competing bids can still outbid you.",

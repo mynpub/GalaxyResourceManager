@@ -85,6 +85,41 @@ class GameplayCommandTests(unittest.TestCase):
             )
         )
 
+    def test_auction_buy_now_command_and_optional_listing_price(self):
+        World().seed(self.game.player_id, fiat=1_000_000, resources={"Fe": 1000})
+        listing_id = self.game.command(
+            "auction list resource Fe 100 fiat 10 --buy-now 25"
+        ).split(": ")[-1]
+        self.assertIn('"buy_now": 25', self.game.command("auctions"))
+        other = GameLogic(output=lambda message: None)
+        other.create_player_account("another", "test long passphrase")
+        World().seed(other.player_id, fiat=100)
+        self.assertIn("Buy now complete", other.command(f"auction buy {listing_id}"))
+        self.assertEqual(World().snapshot(other.player_id)["balances"]["fiat"], 75)
+        self.assertEqual(
+            sum(World().snapshot(other.player_id)["inventory"].values()),
+            100,
+        )
+        no_bin = self.game.command("auction list resource Fe 10 fiat 10").split(": ")[-1]
+        with database._connection() as c:
+            c.execute("UPDATE accounts SET fiat=100 WHERE player_id=?", (other.player_id,))
+        self.assertIn("no buy now price", other.command(f"auction buy {no_bin}"))
+        self.assertIn("--buy-now PRICE", self.game.command("help"))
+
+    def test_bank_buy_now_command_requires_selected_acreage(self):
+        World().seed(self.game.player_id, fiat=2_000_000)
+        listing = next(
+            row for row in json.loads(self.game.command("auctions"))
+            if row["seller_name"] == "Earth Bank" and row["kind"] == "land"
+        )
+        self.assertEqual(listing["buy_now_per_acre"], 1_100_000)
+        self.assertIn("require an acreage",
+                      self.game.command(f"auction buy {listing['id']}"))
+        self.assertIn("Buy now complete",
+                      self.game.command(f"auction buy {listing['id']} 1"))
+        snapshot = World().snapshot(self.game.player_id)
+        self.assertEqual(sum(row["acres"] for row in snapshot["land"]), 1)
+
     def test_local_one_shot_and_play_paths_use_authenticated_commands(self):
         with patch("main.getpass.getpass", return_value="test long passphrase"), \
                 patch("builtins.input", side_effect=["inventory", "quit"]), \
