@@ -124,12 +124,12 @@ class TutorialTests(unittest.TestCase):
         other = database.create_player("bidder", PASSWORD)
         World().seed(other, fiat=20_000_000)
         listing = self.listing()
-        AuctionHouse().bid(other, listing["id"], 1_234_567, acreage=10)
+        AuctionHouse().bid(other, listing["id"], 1_050_000, acreage=10)
         tutorial.claim(self.player)
-        self.assertEqual(self.reward()["minimum_bid"], 1_234_568)
-        self.assertEqual(self.reward()["amount"], 1_358_025)
-        self.assertEqual(World().snapshot(self.player)["balances"]["fiat"], 1_358_148)
-        self.assertIn("escrow", self.game.command(f"land buy {listing['id']} 1 1234568"))
+        self.assertEqual(self.reward()["minimum_bid"], 1_050_001)
+        self.assertEqual(self.reward()["amount"], 1_155_002)
+        self.assertEqual(World().snapshot(self.player)["balances"]["fiat"], 1_155_125)
+        self.assertIn("escrow", self.game.command(f"land buy {listing['id']} 1 1050001"))
 
     def test_reserve_changes_and_small_prices_use_rounded_up_buffer(self):
         self.complete_lessons()
@@ -145,7 +145,7 @@ class TutorialTests(unittest.TestCase):
         other = database.create_player("bidder", PASSWORD)
         World().seed(other, fiat=2_000_000)
         old = self.listing()
-        AuctionHouse().bid(other, old["id"], 2_000_000, acreage=1)
+        AuctionHouse().bid(other, old["id"], 1_099_999, acreage=1)
         tutorial.claim(self.player, clock=lambda: old["closes"])
         with database._connection() as c:
             active = c.execute(
@@ -201,7 +201,8 @@ class TutorialTests(unittest.TestCase):
         self.complete_lessons()
         listing = self.listing()
         with database._connection() as c:
-            c.execute("UPDATE auctions SET reserve=? WHERE id=?", (MAX_INTEGER, listing["id"]))
+            c.execute("UPDATE auctions SET reserve=?,buy_now=? WHERE id=?",
+                      (MAX_INTEGER, MAX_INTEGER, listing["id"]))
         self.assertIn("exceeds SQLite integer range", self.game.command("tutorial claim"))
         self.assertIsNone(self.reward())
         with database._connection() as c:
@@ -229,7 +230,7 @@ class TutorialTests(unittest.TestCase):
         new_player = database.create_player("newplayer", PASSWORD)
         self.assertIn("Tutorial 1/6", tutorial.show(new_player))
         with database._connection() as c:
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_v7_upgrade_preserves_progress_and_prevents_double_reward(self):

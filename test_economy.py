@@ -476,7 +476,7 @@ class MigrationTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda _: database.init_database(), range(8)))
         with database._connection() as c:
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(c.execute("SELECT fiat,btc FROM accounts WHERE player_id=7").fetchone()[:],
                              (3250000, 50000000))
             self.assertEqual(c.execute(
@@ -517,7 +517,7 @@ class MigrationTests(unittest.TestCase):
         database.init_database()
         with database._connection() as c:
             bank_id = economy.earth_bank_id(c)
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(c.execute(
                 "SELECT player_id,acres FROM land WHERE id=1"
             ).fetchone()[:], (7, 100))
@@ -547,7 +547,7 @@ class MigrationTests(unittest.TestCase):
             c.execute("DELETE FROM payments")
         database.init_database()
         with database._connection() as c:
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_v1_rebuild_and_v4_failure_are_one_transaction(self):

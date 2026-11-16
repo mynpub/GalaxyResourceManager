@@ -75,7 +75,7 @@ class DatabaseTests(unittest.TestCase):
             "fiat_balance": 12.5, "bitcoin_balance": 0.001,
         })
         with database._connection() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(tuple(connection.execute("SELECT * FROM payments").fetchone()),
                              (7, 1, "legacy", "2026-01-02"))
@@ -185,6 +185,32 @@ class DatabaseTests(unittest.TestCase):
         payments.write_text(original)
         database.init_database()
         self.assert_legacy_preserved()
+
+    def test_version_eight_upgrade_adds_nullable_buy_now_without_changing_listings(self):
+        self.data_dir.mkdir()
+        with sqlite3.connect(self.data_dir / "galaxy_resources.db") as connection:
+            connection.executescript("""
+                CREATE TABLE auctions (
+                    id INTEGER PRIMARY KEY,
+                    reserve INTEGER NOT NULL CHECK(reserve > 0)
+                );
+                INSERT INTO auctions VALUES (1, 100);
+                PRAGMA user_version = 8;
+            """)
+        database.init_database()
+        with database._connection() as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertIsNone(connection.execute(
+                "SELECT buy_now FROM auctions WHERE id=1"
+            ).fetchone()[0])
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE auctions SET buy_now=0 WHERE id=1"
+                )
+            connection.execute("UPDATE auctions SET buy_now=100 WHERE id=1")
+            self.assertEqual(connection.execute(
+                "SELECT buy_now FROM auctions WHERE id=1"
+            ).fetchone()[0], 100)
 
 
 if __name__ == "__main__":

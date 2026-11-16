@@ -93,8 +93,8 @@ jobs                          equipment
 equip ITEM_ID install|uninstall|on|off
 power                         hashrate
 chain                         auctions
-auction list resource|item|land SYMBOL_OR_ID QUANTITY fiat|btc RESERVE [FEE_SATS] [SECONDS]
-auction bid AUCTION_ID AMOUNT [ACRES]
+auction list resource|item|land SYMBOL_OR_ID QUANTITY fiat|btc RESERVE [FEE_SATS] [SECONDS] [--buy-now PRICE]
+auction bid AUCTION_ID AMOUNT [ACRES] | auction buy AUCTION_ID [ACRES]
 auction cancel AUCTION_ID
 status                        quit
 tutorial [status|next|claim]
@@ -106,6 +106,13 @@ prices/bids are **integer microfiat** (1 fiat = 1,000,000 microfiat) or **satosh
 the corresponding list commands. Symbols are case-sensitive (`Fe`, not `fe`).
 For Earth Bank listings, `AMOUNT` is the per-acre fiat bid and `ACRES` is the
 requested amount; the total (`AMOUNT × ACRES`) is escrowed when the bid is placed.
+For example, `auction list resource Fe 100 fiat 10 --buy-now 25` adds an optional
+fixed price in the auction's currency. `auction buy AUCTION_ID` buys the complete
+player listing immediately; Earth Bank listings require `auction buy AUCTION_ID
+ACRES` and charge the per-acre buy-now price for the selected acres. A purchase
+refunds any current bidder's escrow. Normal bids must stay below buy-now; reaching
+the fixed price requires an explicit `auction buy` command. Fiat buy-now transfers
+settle immediately; Bitcoin purchases enter pending block settlement.
 Commands never accept an acting player ID; authorization comes from the session.
 
 ### New-account tutorial and market-priced fiat reward
@@ -231,6 +238,12 @@ and additional fiat mechanics provide more data:
   **1,000 acres** on the auction house at a time; each bidder chooses **1–1,000
   acres** and bids a fiat price per acre. The highest per-acre bid wins at the
   one-hour close, and the total bid (`price × acres`) is escrowed immediately.
+  Each Bank land listing also offers an immediate buy-now price per acre, rounded
+  up to 10% above the current adjusted market price. The adjusted market price is
+  the recent acreage-weighted sale price multiplied by recent acres sold divided
+  by currently listed Bank acreage. Before the first completed land sale, it
+  falls back to 1 fiat/acre. Use `auction buy AUCTION_ID ACRES` to purchase
+  selected acres at this fixed price; ordinary bids must remain below it.
   The winner receives only the selected acreage; the remainder returns to the
   Bank's reserve. Bank land is fiat-only. Its reserve is 10% below an adjusted
   reference price: the acreage-weighted average price per acre from completed
@@ -293,6 +306,11 @@ and additional fiat mechanics provide more data:
 - Auction default duration is **1 hour**, configurable per listing from 1 second
   to 7 days; fixed closing time, no anti-sniping extension. Reserve is a minimum
   bid, not a second-price rule. Highest bid wins and pays its full bid.
+  Player listings may optionally set a buy-now price in the auction currency.
+  A buyer must explicitly choose it; ordinary bids at or above that price are
+  rejected. Fiat buy-now settles immediately, while BTC purchases become pending
+  for the next block. Earth Bank land buy-now is always enabled at 10% above its
+  adjusted market price and is charged per selected acre.
   Bidders can reuse their own prior escrow when raising. Outbid funds are
   refunded immediately. Cancellation is allowed only while active, even with
   bids; at closing, no-bid auctions expire/refund, fiat sales settle immediately,
@@ -526,6 +544,9 @@ The v8 migration adds tutorial progress and permanent fiat reward claims. Only
 newly created credentialed accounts are enrolled; existing players and assets
 are left unchanged. It can also upgrade the shelved v7 email-tutorial schema,
 preserving progress and preventing a second reward after an earlier land grant.
+The v9 migration adds nullable buy-now prices to auctions. Existing player
+listings remain without a buy-now price; active Earth Bank land listings receive
+a market-based buy-now price. Existing reserves and bids are preserved.
 
 **Legacy Nostr accounts have no passwords or usernames.** Their credentials
 cannot be inferred. They remain preserved but cannot log in through the new

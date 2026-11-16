@@ -97,6 +97,145 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(self.balance(3), 100_000)
         self.assertEqual(self.query("SELECT bidder,bid FROM auctions")[0], {"bidder": 2, "bid": 100})
 
+    def test_optional_fiat_buy_now_settles_immediately_and_refunds_current_bidder(self):
+        listing = self.market.list_asset(
+            1, "resource", "Fe", 50, "fiat", 100, duration=60, buy_now=150
+        )
+        self.assertEqual(self.query(
+            "SELECT reserve,buy_now FROM auctions WHERE id=?", (listing,)
+        )[0], {"reserve": 100, "buy_now": 150})
+        with self.assertRaisesRegex(ValueError, "at least the reserve"):
+            self.market.list_asset(
+                1, "resource", "Fe", 1, "fiat", 100, buy_now=99
+            )
+        with self.assertRaisesRegex(ValueError, "below buy now"):
+            self.market.bid(2, listing, 150)
+        self.market.bid(2, listing, 100)
+        self.assertEqual(self.market.buy_now(3, listing), "sold")
+        self.assertEqual(self.balance(2, "fiat"), 100_000_000)
+        self.assertEqual(self.balance(3, "fiat"), 99_999_850)
+        self.assertEqual(self.balance(1, "fiat"), 100_000_150)
+        self.assertEqual(self.resource(1), 99_950)
+        self.assertEqual(self.resource(3), 100_050)
+        self.assertEqual(self.query(
+            "SELECT status,bidder,bid FROM auctions WHERE id=?", (listing,)
+        )[0], {"status": "sold", "bidder": 3, "bid": 150})
+        with self.assertRaisesRegex(ValueError, "not active"):
+            self.market.buy_now(2, listing)
+
+    def test_bitcoin_buy_now_enters_pending_settlement_and_refunds_prior_bid(self):
+        listing = self.market.list_asset(
+            1, "resource", "Fe", 50, "btc", 100, 7, duration=60, buy_now=200
+        )
+        self.market.bid(2, listing, 150)
+        self.assertEqual(self.market.buy_now(3, listing), "pending")
+        self.assertEqual(self.balance(2), 100_000)
+        self.assertEqual(self.balance(3), 99_800)
+        self.assertEqual(self.query(
+            "SELECT status,bidder,bid FROM auctions WHERE id=?", (listing,)
+        )[0], {"status": "pending", "bidder": 3, "bid": 200})
+        with self.assertRaisesRegex(ValueError, "not active"):
+            self.market.bid(2, listing, 175)
+        self.now = 1600
+        simulation.tick(self.clock)
+        self.assertEqual(self.query(
+            "SELECT status,settled_height FROM auctions WHERE id=?", (listing,)
+        )[0], {"status": "sold", "settled_height": 1})
+        self.assertEqual(self.resource(3), 100_050)
+        self.assertEqual(self.balance(1), 100_193)
+
+    def test_buy_now_reuses_same_buyers_existing_bid_escrow(self):
+        listing = self.market.list_asset(
+            1, "resource", "Fe", 10, "fiat", 100, buy_now=150
+        )
+        self.market.bid(2, listing, 100)
+        self.assertEqual(self.market.buy_now(2, listing), "sold")
+        self.assertEqual(self.balance(2, "fiat"), 99_999_850)
+        self.assertEqual(self.balance(1, "fiat"), 100_000_150)
+        self.assertEqual(self.resource(2), 100_010)
+
+    def test_concurrent_buy_now_purchases_settle_once(self):
+        listing = self.market.list_asset(
+            1, "resource", "Fe", 10, "fiat", 100, buy_now=150
+        )
+
+        def purchase(player):
+            try:
+                return self.market.buy_now(player, listing)
+            except ValueError as error:
+                return str(error)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(purchase, (2, 3)))
+        self.assertEqual(results.count("sold"), 1)
+        self.assertEqual(results.count("Auction is not active"), 1)
+        winner = self.query(
+            "SELECT bidder FROM auctions WHERE id=?", (listing,)
+        )[0]["bidder"]
+        loser = 5 - winner
+        self.assertEqual(self.resource(winner), 100_010)
+        self.assertEqual(self.resource(loser), 100_000)
+        self.assertEqual(self.balance(1, "fiat"), 100_000_150)
+
+    def test_earth_bank_buy_now_is_ten_percent_above_market_and_sells_selected_acres(self):
+        with database._connection() as c:
+            bank_id = economy.earth_bank_id(c)
+            c.execute("UPDATE land SET locked=0 WHERE player_id=?", (bank_id,))
+        simulation.tick(self.clock)
+        listing = self.query(
+            "SELECT a.*,l.acres FROM auctions a JOIN land l ON l.id=CAST(a.asset AS INTEGER) "
+            "WHERE a.seller=? AND a.kind='land' AND a.status='active'", (bank_id,)
+        )[0]
+        self.assertEqual(listing["reserve"], 900_000)
+        self.assertEqual(listing["buy_now"], 1_100_000)
+        self.market.bid(2, listing["id"], 1_000_000, 2)
+        self.assertEqual(self.market.buy_now(3, listing["id"], 3), "sold")
+        self.assertEqual(self.balance(2, "fiat"), 100_000_000)
+        self.assertEqual(self.balance(3, "fiat"), 96_700_000)
+        self.assertEqual(self.balance(bank_id, "fiat"),
+                         economy.BANK_INITIAL_FIAT + 3_300_000)
+        purchased = self.query("SELECT acres,locked FROM land WHERE player_id=3")
+        self.assertEqual(purchased, [{"acres": 3, "locked": 0}])
+        self.assertEqual(self.query(
+            "SELECT status,bid_quantity,bid FROM auctions WHERE id=?", (listing["id"],)
+        )[0], {"status": "sold", "bid_quantity": 3, "bid": 3_300_000})
+        self.assertEqual(self.query("SELECT sum(acres) AS total FROM land")[0]["total"],
+                         economy.LAND_SUPPLY)
+
+    def test_buy_now_requires_available_price_and_correct_acreage(self):
+        ordinary = self.market.list_asset(1, "resource", "Fe", 1, "fiat", 10)
+        with self.assertRaisesRegex(ValueError, "no buy now price"):
+            self.market.buy_now(2, ordinary)
+        with database._connection() as c:
+            bank_id = economy.earth_bank_id(c)
+            c.execute("UPDATE land SET locked=0 WHERE player_id=?", (bank_id,))
+        simulation.tick(self.clock)
+        listing = self.query(
+            "SELECT id FROM auctions WHERE seller=? AND kind='land' AND status='active'",
+            (bank_id,)
+        )[0]["id"]
+        with self.assertRaisesRegex(ValueError, "require an acreage"):
+            self.market.buy_now(2, listing)
+        with self.assertRaisesRegex(ValueError, "1-1000"):
+            self.market.buy_now(2, listing, 1001)
+
+    def test_upgrading_active_bank_listing_assigns_ten_percent_market_buy_now(self):
+        with database._connection() as c:
+            bank_id = economy.earth_bank_id(c)
+            c.execute("UPDATE land SET locked=0 WHERE player_id=?", (bank_id,))
+        simulation.tick(self.clock)
+        listing = self.query(
+            "SELECT id,buy_now FROM auctions WHERE kind='land' AND status='active'"
+        )[0]
+        self.assertEqual(listing["buy_now"], 1_100_000)
+        with database._connection() as c:
+            c.execute("UPDATE auctions SET buy_now=NULL WHERE id=?", (listing["id"],))
+            c.execute("PRAGMA user_version=8")
+        database.init_database()
+        self.assertEqual(self.query(
+            "SELECT buy_now FROM auctions WHERE id=?", (listing["id"],)
+        )[0]["buy_now"], 1_100_000)
+
     def test_pending_cancellation_cutoff_restart_settlement_and_no_double_credit(self):
         listing = self.market.list_asset(1, "resource", "Fe", 50, "btc", 100, 7, duration=10)
         self.market.bid(2, listing, 100)
@@ -235,12 +374,12 @@ class MarketTests(unittest.TestCase):
 
         self.market.bid(2, listing["id"], 1_000_000, 400)
         self.assertEqual(self.balance(2, "fiat"), 400_000_000)
-        self.market.bid(3, listing["id"], 1_100_000, 600)
+        self.market.bid(3, listing["id"], 1_099_999, 600)
         self.assertEqual(self.balance(2, "fiat"), 800_000_000)
-        self.assertEqual(self.balance(3, "fiat"), 140_000_000)
+        self.assertEqual(self.balance(3, "fiat"), 140_000_600)
         self.assertEqual(self.query(
             "SELECT bid,bid_quantity FROM auctions WHERE id=?", (listing["id"],)
-        )[0], {"bid": 660_000_000, "bid_quantity": 600})
+        )[0], {"bid": 659_999_400, "bid_quantity": 600})
 
         self.now += auctions.DEFAULT_DURATION
         simulation.tick(self.clock)
@@ -249,11 +388,11 @@ class MarketTests(unittest.TestCase):
         )[0]["acres"]
         self.assertEqual(buyer_land, 600)
         self.assertEqual(self.balance(bank_id, "fiat"),
-                         economy.BANK_INITIAL_FIAT + 660_000_000)
+                         economy.BANK_INITIAL_FIAT + 659_999_400)
         next_listing = self.query(
-            "SELECT reserve FROM auctions WHERE seller=? AND status='active'", (bank_id,)
+            "SELECT reserve,buy_now FROM auctions WHERE seller=? AND status='active'", (bank_id,)
         )[0]
-        self.assertEqual(next_listing["reserve"], 594_000)
+        self.assertEqual(next_listing, {"reserve": 593_999, "buy_now": 725_999})
 
     def test_time_weighting_prevents_last_second_snapshot_and_survives_restart(self):
         self.miner(1)
