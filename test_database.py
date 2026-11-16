@@ -75,7 +75,7 @@ class DatabaseTests(unittest.TestCase):
             "fiat_balance": 12.5, "bitcoin_balance": 0.001,
         })
         with database._connection() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 10)
             self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(tuple(connection.execute("SELECT * FROM payments").fetchone()),
                              (7, 1, "legacy", "2026-01-02"))
@@ -199,7 +199,7 @@ class DatabaseTests(unittest.TestCase):
             """)
         database.init_database()
         with database._connection() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 10)
             self.assertIsNone(connection.execute(
                 "SELECT buy_now FROM auctions WHERE id=1"
             ).fetchone()[0])

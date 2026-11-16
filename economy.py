@@ -307,6 +307,15 @@ def _droid(c, pid):
                      (pid, item_id)).lastrowid
 
 
+def _queue_craft(c, pid, recipe_id):
+    recipe = RECIPES[recipe_id]
+    now = c.execute("SELECT last_tick FROM chain WHERE id=1").fetchone()[0]
+    return c.execute("""INSERT INTO jobs(player_id,recipe_id,started_at,completes_at,recipe_json)
+                        VALUES (?,?,?,?,?)""",
+                     (pid, recipe_id, now, integer(now + integer(recipe["duration"]), "job end"),
+                      json.dumps(recipe, sort_keys=True))).lastrowid
+
+
 def _deposit_gather(c, pid, mass, weights, total):
     for symbol, weight in zip(catalog.SYMBOLS, weights):
         carry = c.execute("SELECT carry FROM inventory WHERE player_id=? AND symbol=?",
@@ -402,7 +411,9 @@ def advance(c, start, end):
         else:
             recipe = json.loads(event["recipe_json"])
             if recipe["output"] == "droid":
-                _droid(c, event["player_id"])
+                worker_id = _droid(c, event["player_id"])
+                c.execute("UPDATE droid_tutorial SET worker_id=? WHERE job_id=?",
+                          (worker_id, event["id"]))
             else:
                 stats = recipe["stats"]
                 c.execute("INSERT INTO equipment(player_id,kind,hashrate,power_watts) VALUES (?,?,?,?)",
@@ -526,6 +537,11 @@ class World:
                 if land is None or occupied >= land["acres"]:
                     raise ValueError("Land is unavailable or full")
             c.execute("UPDATE workers SET land_id=? WHERE id=?", (land_id, worker_id))
+            if land_id is not None:
+                c.execute(
+                    "UPDATE droid_tutorial SET completed=1 WHERE player_id=? AND worker_id=?",
+                    (pid, worker_id)
+                )
 
     def craft(self, pid, recipe_id):
         if not isinstance(recipe_id, str) or recipe_id not in RECIPES:
@@ -534,11 +550,7 @@ class World:
         with self._transaction(pid) as c:
             for symbol, amount in recipe["inputs"].items():
                 change_resource(c, pid, symbol, -integer(amount))
-            now = c.execute("SELECT last_tick FROM chain WHERE id=1").fetchone()[0]
-            return c.execute("""INSERT INTO jobs(player_id,recipe_id,started_at,completes_at,recipe_json)
-                                VALUES (?,?,?,?,?)""",
-                             (pid, recipe_id, now, now + integer(recipe["duration"]),
-                              json.dumps(recipe, sort_keys=True))).lastrowid
+            return _queue_craft(c, pid, recipe_id)
 
     def equipment(self, pid, item_id, installed, enabled):
         item_id = integer(item_id, "item_id")

@@ -268,6 +268,11 @@ class AuctionHouse:
                 change_resource(c, player, asset, -quantity)
             elif kind == "item":
                 asset = integer(asset, "item ID")
+                if c.execute(
+                    "SELECT 1 FROM workers w JOIN droid_tutorial t ON t.worker_id=w.id "
+                    "WHERE w.equipment_id=? AND w.player_id=?", (asset, player)
+                ).fetchone():
+                    raise ValueError("Your tutorial droid cannot be traded")
                 changed = c.execute(
                     "UPDATE equipment SET locked=1 WHERE id=? AND player_id=? "
                     "AND installed=0 AND locked=0 AND NOT EXISTS "

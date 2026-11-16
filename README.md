@@ -98,6 +98,7 @@ auction bid AUCTION_ID AMOUNT [ACRES] | auction buy AUCTION_ID [ACRES]
 auction cancel AUCTION_ID
 status                        quit
 tutorial [status|next|claim]
+tutorial droid [start|craft "NAME"]
 ```
 
 Quantities are **integer micrograms** (1 kg = 1,000,000,000 micrograms);
@@ -136,8 +137,8 @@ regardless of your existing savings. With a fresh world's 900,000-microfiat
 reserve, this pays 990,000 microfiat (0.99 fiat).
 
 The claim prints a ready-to-use `land buy AUCTION_ID 1 PRICE_PER_ACRE` command.
-You must still place the bid and win the auction; no land, workers, equipment or
-resources are granted automatically. The price is sampled at claim time, not
+You must still place the bid and win the auction; no land is granted
+automatically. The price is sampled at claim time, not
 signup or lesson start. A later competing bid or auction price change can exceed
 the payout; the buffer is not a guaranteed auction win or an ongoing top-up.
 If there is no active Bank land auction, the claim reports an error without
@@ -158,6 +159,27 @@ a bot defense. An auction participant can also raise the current bid to increase
 future tutorial payouts. This intentionally uncapped, market-linked grant mints
 fiat and increases the supply used for Bank wage calculations; it is not
 production anti-farming protection.
+
+### Droid tutorial
+
+After obtaining land, use `tutorial droid start` to begin the separate droid
+tutorial, then `tutorial droid` to see the current instructions. The tutorial
+shows the recipe and uses `tutorial droid craft "NAME"` to name the droid and
+start a normal timed job, using one free set of tutorial-only materials. Names
+must be 1–32 printable characters; use quotes for names containing spaces.
+An unlocked owned parcel is
+required to start the job. The materials never enter inventory and cannot be
+traded or used in another recipe. Check `jobs`, then return to `tutorial droid`
+after the job finishes for the worker ID and assignment instructions. Use
+`land` and `assign WORKER_ID PARCEL_ID` to put the droid to work; one worker
+fits per acre. Assignment completes the tutorial, and gathering continues offline.
+
+The tutorial is available to existing and new accounts, and progress persists
+across reconnects. Each account can use the starter materials once, even if land
+changes hands. The named tutorial droid is permanently untradeable; other droids
+remain tradable. Its name and tradeability appear in `workers` and `equipment`.
+One claim per account does **not** prevent multiple accounts from using free
+droids to gather tradable resources.
 
 ### Explicit test-world walkthrough (not production bootstrap)
 
