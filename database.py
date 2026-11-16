@@ -15,23 +15,26 @@ DATA_DIR = Path.home() / ".galaxy_resources"
 
 
 def _initialize(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 9:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 10:
         return
     _initialize_v6(connection)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version >= 9:
+        if version >= 10:
             return
         if version < 8:
             import tutorial
             tutorial.initialize(connection)
             connection.execute("PRAGMA user_version = 8")
-        import auctions
-        auctions.migrate_v9(connection)
+        if version < 9:
+            import auctions
+            auctions.migrate_v9(connection)
+        import tutorial
+        tutorial.initialize_droid(connection)
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise sqlite3.IntegrityError("Database contains invalid references")
-        connection.execute("PRAGMA user_version = 9")
+        connection.execute("PRAGMA user_version = 10")
 
 
 def _initialize_v6(connection):

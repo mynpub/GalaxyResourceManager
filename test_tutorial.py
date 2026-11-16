@@ -1,5 +1,6 @@
 """Resumable tutorial, market-priced payouts and atomic one-time claims."""
 
+import json
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +10,7 @@ from unittest.mock import patch
 import database
 import tutorial
 from auctions import AuctionHouse
-from economy import MAX_INTEGER, World, earth_bank_id
+from economy import MAX_INTEGER, RECIPES, World, earth_bank_id
 from game_logic import GameLogic
 
 PASSWORD = "a long test passphrase"
@@ -230,7 +231,7 @@ class TutorialTests(unittest.TestCase):
         new_player = database.create_player("newplayer", PASSWORD)
         self.assertIn("Tutorial 1/6", tutorial.show(new_player))
         with database._connection() as c:
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 10)
             self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_v7_upgrade_preserves_progress_and_prevents_double_reward(self):
@@ -252,6 +253,135 @@ class TutorialTests(unittest.TestCase):
             self.assertEqual(c.execute(
                 "SELECT step FROM tutorial_progress WHERE player_id=?", (self.player,)
             ).fetchone()[0], 6)
+
+    def test_droid_tutorial_full_flow_and_nontransferable_materials(self):
+        self.assertIn("tutorial droid start", self.game.command("tutorial droid"))
+        self.assertIn("Start the droid tutorial", self.game.command('tutorial droid craft "R2"'))
+        self.assertIn("Droid recipe", self.game.command("tutorial droid start"))
+        self.assertIn("need unlocked land", self.game.command('tutorial droid craft "R2"'))
+        before = World().snapshot(self.player)
+        self.assertEqual(sum(before["inventory"].values()), 0)
+        self.assertNotIn("queued", self.game.command("craft droid"))
+        World().seed(self.player, acres=1)
+        land = World().snapshot(self.player)["land"][0]["id"]
+        self.assertIn("job #", self.game.command('tutorial droid craft "R2"'))
+        self.assertIn("already been queued", self.game.command('tutorial droid craft "R2"'))
+        self.assertIn("in progress", self.game.command("tutorial droid"))
+        snapshot = World().snapshot(self.player)
+        self.assertEqual(sum(snapshot["inventory"].values()), 0)
+        job = snapshot["jobs"][0]
+        self.assertEqual(job["recipe_id"], "droid")
+        self.assertEqual(job["completes_at"] - job["started_at"], RECIPES["droid"]["duration"])
+        World(clock=lambda: job["completes_at"]).snapshot(self.player)
+        with database._connection() as c:
+            worker = c.execute(
+                "SELECT worker_id FROM droid_tutorial WHERE player_id=?", (self.player,)
+            ).fetchone()[0]
+        self.assertIn(f"worker is #{worker}", tutorial.droid_status(
+            self.player, clock=lambda: job["completes_at"]))
+        future = World(clock=lambda: job["completes_at"])
+        future.assign(self.player, worker, land)
+        self.assertIn("tutorial complete", tutorial.droid_status(
+            self.player, clock=lambda: job["completes_at"]))
+        snapshot = World(clock=lambda: job["completes_at"] + 10).snapshot(self.player)
+        self.assertGreater(sum(snapshot["inventory"].values()), 0)
+        self.assertEqual(next(s["xp"] for s in snapshot["skills"]
+                              if s["name"] == "crafting"), RECIPES["droid"]["xp"])
+
+    def test_droid_tutorial_one_job_under_concurrency_and_reconnect(self):
+        World().seed(self.player, acres=1)
+        self.game.command("tutorial droid start")
+
+        def craft(_):
+            try:
+                return tutorial.craft_droid(self.player, "R2")
+            except ValueError as error:
+                return str(error)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(craft, range(4)))
+        self.assertEqual(sum("queued using" in result for result in results), 1)
+        self.assertEqual(sum("already been queued" in result for result in results), 3)
+        returning = GameLogic(output=lambda message: None)
+        self.assertTrue(returning.login("explorer", PASSWORD))
+        self.assertIn("in progress", returning.command("tutorial droid"))
+        self.assertIn("in progress", returning.command("tutorial droid start"))
+        self.assertEqual(len(World().snapshot(self.player)["jobs"]), 1)
+
+    def test_droid_tutorial_after_actual_land_purchase(self):
+        World().seed(self.player, fiat=1_100_000)
+        listing = self.listing()
+        self.assertIn("Buy now complete", self.game.command(f"auction buy {listing['id']} 1"))
+        self.assertIn("Droid recipe", self.game.command("tutorial droid start"))
+        self.assertIn("queued", self.game.command('tutorial droid craft "R2"'))
+        with database._connection() as c:
+            c.execute("UPDATE jobs SET completes_at=started_at WHERE player_id=?", (self.player,))
+        self.assertIn("Your droid worker is", self.game.command("tutorial droid"))
+        snapshot = World().snapshot(self.player)
+        land = snapshot["land"][0]["id"]
+        worker = snapshot["workers"][0]["id"]
+        self.assertIn("Assignment updated", self.game.command(f"assign {worker} {land}"))
+        self.assertIn("tutorial complete", self.game.command("tutorial droid"))
+        self.game.command(f"assign {worker} none")
+        self.assertIn("already been queued", self.game.command('tutorial droid craft "R2"'))
+
+    def test_droid_tutorial_requires_unlocked_land(self):
+        World().seed(self.player, acres=1)
+        land = World().snapshot(self.player)["land"][0]["id"]
+        AuctionHouse().list_asset(self.player, "land", str(land), 1, "fiat", 1)
+        self.game.command("tutorial droid start")
+        self.assertIn("need unlocked land", self.game.command('tutorial droid craft "R2"'))
+        with database._connection() as c:
+            self.assertIsNone(c.execute(
+                "SELECT job_id FROM droid_tutorial WHERE player_id=?", (self.player,)
+            ).fetchone()[0])
+
+    def test_tutorial_droid_name_and_trade_restrictions(self):
+        World().seed(self.player, acres=1, droids=1)
+        self.game.command("tutorial droid start")
+        for invalid in ('tutorial droid craft ""', 'tutorial droid craft "   "',
+                        'tutorial droid craft "' + "x" * 33 + '"',
+                        'tutorial droid craft "bad\nname"'):
+            self.assertIn("1-32 printable", self.game.command(invalid))
+        self.assertIn('craft "NAME"', self.game.command("tutorial droid craft"))
+        self.assertIn("Rover One", self.game.command('tutorial droid craft "Rover One"'))
+        with database._connection() as c:
+            c.execute("UPDATE jobs SET completes_at=started_at WHERE player_id=?", (self.player,))
+        self.assertIn("named Rover One", self.game.command("tutorial droid"))
+        workers = json.loads(self.game.command("workers"))
+        starter = next(w for w in workers if w.get("name") == "Rover One")
+        self.assertFalse(starter["tradable"])
+        equipment = json.loads(self.game.command("equipment"))
+        item = next(e for e in equipment if e["id"] == starter["equipment_id"])
+        self.assertEqual(item["name"], "Rover One")
+        self.assertFalse(item["tradable"])
+        for currency in ("fiat", "btc"):
+            self.assertIn("cannot be traded", self.game.command(
+                f"auction list item {item['id']} 1 {currency} 1"))
+        land = World().snapshot(self.player)["land"][0]["id"]
+        self.game.command(f"assign {starter['id']} {land}")
+        self.game.command(f"assign {starter['id']} none")
+        self.assertIn("cannot be traded", self.game.command(
+            f"auction list item {item['id']} 1 fiat 1"))
+        ordinary = next(w for w in workers if w["id"] != starter["id"])
+        self.assertIn("Auction listed", self.game.command(
+            f"auction list item {ordinary['equipment_id']} 1 fiat 1"))
+        returning = GameLogic(output=lambda message: None)
+        self.assertTrue(returning.login("explorer", PASSWORD))
+        self.assertIn("Rover One", returning.command("tutorial droid"))
+        self.assertIn("Rover One", returning.command("workers"))
+
+    def test_v9_upgrade_preserves_accounts_and_allows_droid_tutorial(self):
+        with database._connection() as c:
+            c.execute("DROP TABLE droid_tutorial")
+            c.execute("PRAGMA user_version=9")
+        database.init_database()
+        database.init_database()
+        self.assertEqual(database.authenticate_player("explorer", PASSWORD), self.player)
+        self.assertIn("Droid recipe", self.game.command("tutorial droid start"))
+        with database._connection() as c:
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 10)
+            self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
 
 
 if __name__ == "__main__":

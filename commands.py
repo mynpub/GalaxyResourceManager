@@ -14,6 +14,7 @@ from simulation import tick
 
 HELP = """world | land | inventory/resources | workers | skills | jobs | equipment | power/hashrate
 tutorial [status|next|claim]
+tutorial droid [start|craft "NAME"]
 work [status|start] (Earth Bank employment; 8-hour shifts)
 land buy AUCTION_ID ACRES PRICE_PER_ACRE | land sell PARCEL_ID
 assign WORKER_ID PARCEL_ID|none
@@ -31,7 +32,8 @@ Listed land/items must be idle/uninstalled. Bitcoin fees are reserved from the s
 Bank shifts gather resources for Earth Bank and pay fiat at shift completion.
 status/profile | help | quit
 Finish the tutorial for a one-time fiat reward: current one-acre winning bid plus 10%.
-No workers or equipment are granted; work start earns your first wages."""
+Use tutorial droid for a one-time starter droid after obtaining land;
+work start earns your first wages."""
 
 
 def fixed(value, scale):
@@ -72,7 +74,13 @@ def execute(player, line):
                 return tutorial.next_lesson(player)
             if args == ["claim"]:
                 return tutorial.claim(player)
-            raise ValueError("Use tutorial [status|next|claim]")
+            if args == ["droid"]:
+                return tutorial.droid_status(player)
+            if args == ["droid", "start"]:
+                return tutorial.start_droid(player)
+            if len(args) == 3 and args[:2] == ["droid", "craft"]:
+                return tutorial.craft_droid(player, args[2])
+            raise ValueError('Use tutorial [status|next|claim] or tutorial droid [start|craft "NAME"]')
         # Reads also resume bounded offline catch-up; mutators enforce complete catch-up.
         tick()
         world = World()
@@ -208,6 +216,18 @@ def execute(player, line):
                 if command == "skills":
                     for skill in result:
                         skill["level"] = catalog.level(skill["xp"])
+                elif command in ("workers", "equipment"):
+                    droid = c.execute(
+                        "SELECT t.name,t.worker_id,w.equipment_id FROM droid_tutorial t "
+                        "JOIN workers w ON w.id=t.worker_id WHERE t.player_id=?",
+                        (player,)
+                    ).fetchone()
+                    if droid:
+                        asset_id = droid["worker_id" if command == "workers" else "equipment_id"]
+                        for item in result:
+                            if item["id"] == asset_id:
+                                item["name"] = droid["name"]
+                                item["tradable"] = False
             elif command == "world":
                 result = {"active_location": "Earth", "land_acres": 36_800_000_000,
                           "sea_enabled": False,

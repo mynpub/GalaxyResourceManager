@@ -4,7 +4,7 @@ import json
 import time
 
 import database
-from economy import World, credit, earth_bank_id, integer
+from economy import RECIPES, World, _queue_craft, credit, earth_bank_id, integer
 
 LESSONS = (
     (
@@ -98,6 +98,92 @@ def initialize(c):
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tutorial_rewards'"
     ).fetchone():
         c.execute("INSERT INTO tutorial_legacy_claims SELECT player_id FROM tutorial_rewards")
+
+
+def initialize_droid(c):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS droid_tutorial (
+            player_id INTEGER PRIMARY KEY REFERENCES players(id),
+            job_id INTEGER UNIQUE REFERENCES jobs(id),
+            worker_id INTEGER UNIQUE REFERENCES workers(id),
+            name TEXT CHECK(name IS NULL OR length(name) BETWEEN 1 AND 32),
+            completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1)),
+            CHECK(job_id IS NULL OR name IS NOT NULL)
+        )
+    """)
+
+
+def droid_status(player, clock=time.time):
+    with World(clock)._transaction(player) as c:
+        row = c.execute("SELECT * FROM droid_tutorial WHERE player_id=?", (player,)).fetchone()
+        if row is None:
+            return (
+                "Droid tutorial: learn to craft and assign a worker to your land. "
+                "Use tutorial droid start to begin. Starter materials are only usable "
+                "for this one droid and cannot be traded. The named droid is also untradeable."
+            )
+        if row["completed"]:
+            return f"Droid tutorial complete! {row['name']} has been assigned to your land."
+        if row["job_id"] is None:
+            recipe = RECIPES["droid"]
+            inputs = ", ".join(f"{symbol}: {amount}" for symbol, amount in recipe["inputs"].items())
+            return (
+                f"Droid recipe (micrograms): {inputs}. Normal crafting consumes these "
+                f"resources and takes {recipe['duration']} seconds. Use land to find an "
+                'unlocked parcel you own, then tutorial droid craft "NAME" to name '
+                "and craft your droid using your one-time tutorial materials. "
+                "The materials and the finished droid cannot be traded."
+            )
+        if row["worker_id"] is None:
+            job = c.execute("SELECT completes_at FROM jobs WHERE id=?", (row["job_id"],)).fetchone()
+            return (
+                f"Droid craft job #{row['job_id']} for {row['name']} is in progress "
+                f"until {job['completes_at']}. "
+                "Use jobs to check it; offline time counts. Then use tutorial droid."
+            )
+        worker = c.execute("SELECT player_id FROM workers WHERE id=?", (row["worker_id"],)).fetchone()
+        if worker is None or worker["player_id"] != player:
+            return (
+                "Your tutorial droid is no longer yours, so it cannot be assigned for "
+                "this lesson. Tutorial materials cannot be claimed again."
+            )
+        return (
+            f"Your droid worker is #{row['worker_id']}, named {row['name']}. "
+            "This droid is untradeable. Use land to find an unlocked "
+            f"parcel with room, then assign {row['worker_id']} PARCEL_ID. Each acre "
+            "holds one worker. Check workers and inventory; assigned droids gather "
+            "automatically, including offline."
+        )
+
+
+def start_droid(player, clock=time.time):
+    with World(clock)._transaction(player) as c:
+        c.execute("INSERT OR IGNORE INTO droid_tutorial(player_id) VALUES (?)", (player,))
+    return droid_status(player, clock)
+
+
+def craft_droid(player, name, clock=time.time):
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 32 \
+            or not name.isprintable():
+        raise ValueError("Droid name must be 1-32 printable characters.")
+    name = name.strip()
+    with World(clock)._transaction(player) as c:
+        row = c.execute("SELECT job_id FROM droid_tutorial WHERE player_id=?", (player,)).fetchone()
+        if row is None:
+            raise ValueError("Start the droid tutorial first: tutorial droid start")
+        if row["job_id"] is not None:
+            raise ValueError("Your one-time tutorial droid has already been queued.")
+        if not c.execute(
+            "SELECT 1 FROM land WHERE player_id=? AND locked=0 AND acres>0", (player,)
+        ).fetchone():
+            raise ValueError("You need unlocked land before using the tutorial materials.")
+        job_id = _queue_craft(c, player, "droid")
+        c.execute("UPDATE droid_tutorial SET job_id=?,name=? WHERE player_id=?",
+                  (job_id, name, player))
+        return (
+            f"Tutorial droid craft job #{job_id} for {name} queued using your one-time materials. "
+            "Use jobs to check progress, then tutorial droid for the next step."
+        )
 
 
 def progress(c, player):
@@ -209,5 +295,6 @@ def claim(player, clock=time.time):
             f"one-acre minimum winning bid of {minimum} plus 10% (rounded up). "
             f"To bid for one acre now: land buy {listing['id']} 1 {minimum}\n"
             "This reward is paid once per account. Land is not granted automatically; "
-            "later bids may outbid you. Use auctions to check the latest price."
+            "later bids may outbid you. Use auctions to check the latest price. "
+            "Once you own land, use tutorial droid to learn to craft a worker."
         )
